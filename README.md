@@ -1,2 +1,3 @@
-Before first start do "npm install" in cli \n
+Before first start do "npm install" in cli 
+
 To start do "npm run dev" in cli
