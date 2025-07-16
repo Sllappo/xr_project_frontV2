@@ -22,6 +22,7 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
   const texture = useRef(new THREE.Texture());
   const rightController = useXRInputSourceState("controller", "right");
   const [forceRender, setForceRender] = useState(0);
+  const BACK_URL= import.meta.env.VITE_JAVA_BACK_URL;
   useFrame(() => {
     if (forceRender > 0) {
       invalidate();
@@ -31,37 +32,36 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
 
 
   useEffect(() => {
-    if (!file) return;
+  if (!file) return;
 
-    // Charge le PDF et génère la texture
-    pdfjs.getDocument(file).promise.then((pdf) => {
-      setNumPages(pdf.numPages);
-      renderPDFToTexture(pdf, currentPage);
+  fetch(`${BACK_URL}/api/pdf-info?filename=${encodeURIComponent(file)}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.pages) {
+        setNumPages(data.pages);
+      } else {
+        console.warn("Erreur récupération info PDF :", data.error);
+      }
+    })
+    .catch(err => {
+      console.error("Erreur appel PDF info :", err);
     });
-  }, [file, currentPage]);
+}, [file]);
 
-  const renderPDFToTexture = async (pdf, pageNum) => {
-    try {
-      const page = await pdf.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 2 });
+  useEffect(() => {
+  if (!file || !currentPage) return;
 
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-
-      const renderContext = { canvasContext: ctx, viewport };
-      await page.render(renderContext).promise;
-
-      texture.current.image = canvas;
+  fetch(`${BACK_URL}/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
+    .then(res => res.blob())
+    .then(blob => createImageBitmap(blob))
+    .then(imageBitmap => {
+      texture.current.image = imageBitmap;
       texture.current.needsUpdate = true;
-      invalidate(); // Force the refresh in R3F
-      setForceRender(10); // Forcer 10 frames de rendu
-    } catch (err) {
-      console.error("Erreur rendu PDF :", err);
-    }
-  };
+      invalidate();
+    })
+    .catch(err => console.error("Erreur chargement PDF depuis serveur :", err));
+}, [file, currentPage]);
+
 
   const goToPage = (newPage) => {
     if (newPage >= 1 && newPage <= numPages) {
@@ -69,14 +69,14 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
     }
   };
 
-  // Orientation constante vers la caméra
+  // Make the doc to always look at the camera
   useFrame(() => {
     if (meshRef.current) {
       meshRef.current.lookAt(camera.position);
     }
   });
 
-  // Déplacement avec le stick droit
+  // Movement with the stick
   useFrame(() => {
     if (!meshRef.current || !rightController) return;
     const thumbstick = rightController.gamepad["xr-standard-thumbstick"];
@@ -85,7 +85,7 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
     }
   });
 
-  // Gestion boutons : suppression et navigation
+  // Input management
   useFrame(() => {
     if (!meshRef.current || !rightController?.inputSource?.gamepad) return;
 
@@ -116,7 +116,7 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
       onPointerDown={(e) => {
         isDraggingRef.current = true
 
-        // Calcule la distance entre le pointeur et la position du cube
+        // Calculate distance between pointer and document
         const cubeWorldPosition = new THREE.Vector3()
         console.log(cubeWorldPosition)
         meshRef.current.getWorldPosition(cubeWorldPosition)
@@ -124,11 +124,11 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
         const distance = e.ray.origin.distanceTo(cubeWorldPosition)
         grabDistanceRef.current = distance
 
-        // Place immédiatement le cube à cette distance (si souhaité)
+        // Keep the distance when grabbing
         const targetPosition = e.ray.origin.clone().add(e.ray.direction.clone().multiplyScalar(distance))
         meshRef.current?.position.copy(targetPosition)
 
-        // Pour que le cube reste interactif dans WebXR
+        // make the document interactable
         e.stopPropagation()
       }}
       onPointerMove={(e) => {
@@ -156,7 +156,7 @@ function VRMenu({ addPDF, pdfList }) {
   const meshRef = useRef();
   const isPressing = useRef(false);
 
-  // Récupérer l'état du contrôleur droit
+  // Get stick state
   const rightController = useXRInputSourceState("controller", "right");
 
   useFrame(() => {
@@ -167,8 +167,8 @@ function VRMenu({ addPDF, pdfList }) {
     if (rightController?.inputSource?.gamepad) {
       const buttons = rightController.inputSource.gamepad.buttons;
 
-      // Gérer l'ouverture/fermeture du menu avec le bouton "Stick"
-      if (buttons[4]?.pressed && !isPressing.current) {
+      // Manage the opening and closing of the menu
+      if (buttons[4]?.pressed && !isPressing.current && !buttons[0]?.pressed) {
         setMenuOpen((prev) => !prev);
         isPressing.current = true;
       }
@@ -240,7 +240,7 @@ function App() {
     if (!newFile) return;
     console.log("XR is presenting:", store.getState().isPresenting);
 
-    const fileURL = `/${newFile}`; // 📄 Fichier dans `public/`
+    const fileURL = `/${newFile}`; // 📄 Files in `public/`
 
     const newPDF = {
       id: Date.now(),
