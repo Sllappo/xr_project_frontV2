@@ -1,5 +1,5 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { XR, createXRStore, useXR, useXRInputSourceState } from '@react-three/xr'
+import { XR, createXRStore, useXR, useXRInputSourceState, useXRHitTest } from '@react-three/xr'
 import { useState, useRef, useEffect } from 'react'
 import { Plane, Text } from "@react-three/drei";
 import * as THREE from 'three'
@@ -12,7 +12,32 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pd
 const store = createXRStore({ controller: {left:false}, hitTest: true, hand: false})
 
 function DraggablePDF({ id, removePDF, initialPosition, file }) {
-  const { camera, invalidate} = useThree();
+  // Empêche le déplacement du PDF dans la zone d'exclusion
+  useFrame(() => {
+    if (meshRef.current && window.__xr_anchor) {
+      const anchor = window.__xr_anchor;
+      const exclusionZoneSize = 1;
+      // Récupère la position globale du PDF
+      const worldPos = new THREE.Vector3();
+      meshRef.current.getWorldPosition(worldPos);
+      if (
+        Math.abs(worldPos.x - anchor.x) < exclusionZoneSize / 2 &&
+        Math.abs(worldPos.y - anchor.y) < exclusionZoneSize / 2 &&
+        Math.abs(worldPos.z - anchor.z) < exclusionZoneSize / 2
+      ) {
+        // Repousse le PDF en dehors de la zone
+        const direction = new THREE.Vector3().subVectors(worldPos, anchor).normalize();
+        const newWorldPos = anchor.clone().add(direction.multiplyScalar(exclusionZoneSize / 2 + 0.01));
+        // Pour déplacer le mesh à la nouvelle position monde, il faut convertir en coordonnées locales si le mesh a un parent
+        if (meshRef.current.parent) {
+          meshRef.current.position.copy(meshRef.current.parent.worldToLocal(newWorldPos));
+        } else {
+          meshRef.current.position.copy(newWorldPos);
+        }
+      }
+    }
+  });
+  const { camera} = useThree();
   const isDraggingRef = useRef(false)
   const isPressing = useRef(false);
   const grabDistanceRef = useRef(1.5)
@@ -25,7 +50,6 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
   const BACK_URL= import.meta.env.VITE_JAVA_BACK_URL;
   useFrame(() => {
     if (forceRender > 0) {
-      invalidate();
       setForceRender(forceRender - 1);
     }
   });
@@ -57,7 +81,6 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
     .then(imageBitmap => {
       texture.current.image = imageBitmap;
       texture.current.needsUpdate = true;
-      invalidate();
     })
     .catch(err => console.error("Erreur chargement PDF depuis serveur :", err));
 }, [file, currentPage]);
@@ -155,6 +178,7 @@ function VRMenu({ addPDF, pdfList }) {
   const [selectedFile, setSelectedFile] = useState("");
   const meshRef = useRef();
   const isPressing = useRef(false);
+  
 
   // Get stick state
   const rightController = useXRInputSourceState("controller", "right");
@@ -221,33 +245,170 @@ function VRMenu({ addPDF, pdfList }) {
   );
 }
 
-function App() {
-  const [pdfs, setPDFs] = useState([]);
-  const [pdfList, setPdfList] = useState([]);
+function ManualHitTestAnchor({ setAnchor, hasAnchored }) {
+  const { session } = useXR();
+  const hitTestSourceRef = useRef(null);
+  const viewerRefSpaceRef = useRef(null);
 
   useEffect(() => {
-    setPDFs([{ id: 1, position: [0, 1, -1.5], file: "/test.pdf" }]);
-  }, []); 
-  
+    if (!session) return;
+
+    let cancelled = false;
+
+    const init = async () => {
+      const viewerSpace = await session.requestReferenceSpace("viewer");
+      viewerRefSpaceRef.current = viewerSpace;
+
+      const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      hitTestSourceRef.current = hitTestSource;
+      console.log("📡 Manual hit test source created");
+
+      const onXRFrame = (time, frame) => {
+        if (cancelled || !viewerRefSpaceRef.current || !hitTestSourceRef.current) return;
+
+        const viewerPose = frame.getViewerPose(viewerRefSpaceRef.current);
+        if (!viewerPose) {
+          session.requestAnimationFrame(onXRFrame);
+          return;
+        }
+
+        const results = frame.getHitTestResults(hitTestSourceRef.current);
+        if (results.length > 0 && !hasAnchored) {
+          const pose = results[0].getPose(viewerRefSpaceRef.current);
+          if (pose) {
+            const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
+            const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
+            console.log("🎯 Manual hit set anchor:", pos);
+            setAnchor(pos);
+          }
+        }
+
+        session.requestAnimationFrame(onXRFrame);
+      };
+
+      session.requestAnimationFrame(onXRFrame);
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+      if (hitTestSourceRef.current?.cancel) {
+        hitTestSourceRef.current.cancel();
+      }
+    };
+  }, [session, hasAnchored, setAnchor]);
+
+  return null;
+}
+
+
+
+function AnchorVisual({ anchor, onConfirm }) {
+  if (!anchor) {
+    console.log("🟠 AnchorVisual: Pas d'ancre, sphère rouge affichée à [0, 1.2, -1]");
+    return (
+      <mesh position={[0, 1.2, -1]}>
+        <sphereGeometry args={[0.05, 16, 16]} />
+        <meshStandardMaterial color="red" />
+      </mesh>
+    );
+  }
+
+  console.log("🟢 AnchorVisual: Ancre trouvée à", anchor);
+  return (
+    <group>
+      <mesh position={anchor}>
+        <sphereGeometry args={[0.05, 16, 16]} />
+        <meshStandardMaterial color="orange" />
+      </mesh>
+      <Text
+        position={anchor.clone().add(new THREE.Vector3(0, 0.15, 0))}
+        fontSize={0.05}
+        color="white"
+        onClick={onConfirm}
+      >
+        📌 Définir ici
+      </Text>
+    </group>
+  );
+}
+
+function App() {
+  // Visualisation de la zone d'exclusion autour de l'ancre
+  function ExclusionZone({ anchor, size }) {
+    if (!anchor) return null;
+    return (
+      <mesh position={anchor}>
+        <boxGeometry args={[size, size, size]} />
+        <meshStandardMaterial color="red" transparent opacity={0.2} />
+      </mesh>
+    );
+  }
+  const [pdfs, setPDFs] = useState([]);
+  const [pdfList, setPdfList] = useState([]);
+  const [anchor, setAnchor] = useState(null);
+  const [hasAnchored, setHasAnchored] = useState(false);
+  const [xrStarted, setXRStarted] = useState(false);
+
+  // Stocke l'ancre dans window pour accès global
+  useEffect(() => {
+    if (anchor) {
+      window.__xr_anchor = anchor;
+    }
+  }, [anchor]);
+
+  // Taille de la zone d'exclusion (1m x 1m x 1m)
+  const exclusionZoneSize = 1;
+
+  // Vérifie si une position est dans la zone d'exclusion autour de l'ancre
+  const isInExclusionZone = (position) => {
+    if (!anchor) return false;
+    let posVec;
+    if (Array.isArray(position)) {
+      posVec = new THREE.Vector3(...position);
+    } else if (position instanceof THREE.Vector3) {
+      posVec = position;
+    } else {
+      // fallback
+      return false;
+    }
+    return (
+      Math.abs(posVec.x - anchor.x) < exclusionZoneSize / 2 &&
+      Math.abs(posVec.y - anchor.y) < exclusionZoneSize / 2 &&
+      Math.abs(posVec.z - anchor.z) < exclusionZoneSize / 2
+    );
+  };
+
+
   useEffect(() => {
     fetch("/pdf-list.json")
       .then((res) => res.json())
       .then(setPdfList)
-      .catch((err) => console.error("Erreur lors du chargement de la liste des PDFs :", err));
+      .catch((err) => console.error("Erreur chargement PDF:", err));
   }, []);
 
   const addPDF = (newFile) => {
-    if (!newFile) return;
-    console.log("XR is presenting:", store.getState().isPresenting);
+    if (!newFile || !anchor) return;
+    const fileURL = `/${newFile}`;
+    const offset = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.6,
+      0.5 + Math.random() * 0.2,
+      -0.5 + Math.random() * 0.2
+    );
+    const pdfPosition = anchor.clone().add(offset);
 
-    const fileURL = `/${newFile}`; // 📄 Files in `public/`
+    // Vérifie la zone d'exclusion
+    if (isInExclusionZone(pdfPosition)) {
+      alert("Impossible d'instancier un PDF dans la zone d'exclusion autour de l'ancre !");
+      return;
+    }
 
     const newPDF = {
       id: Date.now(),
-      position: [-2, 1.5, -2],
+      position: [pdfPosition.x, pdfPosition.y, pdfPosition.z],
       file: fileURL,
     };
-
     setPDFs((prev) => [...prev, newPDF]);
   };
 
@@ -255,21 +416,51 @@ function App() {
     setPDFs((prev) => prev.filter((pdf) => pdf.id !== id));
   };
 
-
-  return(
+  return (
     <div className='globalDisplay'>
-      <button onClick={() => store.enterAR()}>Enter AR</button>
-      <Canvas frameloop="always">
-          <ambientLight intensity={0.5} />
-          <XR store={store} >
-            {pdfs.map((pdf) => (
-                <DraggablePDF key={pdf.id} id={pdf.id} initialPosition={pdf.position} file={pdf.file} removePDF={removePDF} />
+      <button
+        onClick={async () => {
+          try {
+            await store.enterAR();
+            console.log("✅ Entered AR session");
+            setXRStarted(true);
+          } catch (err) {
+            console.error("❌ Failed to enter AR", err);
+          }
+        }}
+      >
+        Enter AR
+      </button>
+      <Canvas >
+        <ambientLight intensity={0.5} />
+        <XR store={store} referenceSpace="local-floor">
+          {xrStarted && (
+            <ManualHitTestAnchor
+            setAnchor={setAnchor}
+            hasAnchored={hasAnchored}
+          />
+          )}
+          {!hasAnchored && <AnchorVisual anchor={anchor} onConfirm={() => setHasAnchored(true)} />}
+
+          {hasAnchored && (
+            <>
+              <ExclusionZone anchor={anchor} size={exclusionZoneSize} />
+              {pdfs.map((pdf) => (
+                <DraggablePDF
+                  key={pdf.id}
+                  id={pdf.id}
+                  initialPosition={pdf.position}
+                  file={pdf.file}
+                  removePDF={removePDF}
+                />
               ))}
-            <VRMenu addPDF={addPDF} pdfList={pdfList} />
+              <VRMenu addPDF={addPDF} pdfList={pdfList} anchor={anchor} />
+            </>
+          )}
         </XR>
       </Canvas>
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
