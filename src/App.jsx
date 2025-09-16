@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { Plane, Text } from "@react-three/drei";
 import * as THREE from 'three'
 import { pdfjs } from "react-pdf";
+import './App.css'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.mjs`;
 
@@ -13,22 +14,33 @@ const store = createXRStore({ controller: {left:false}, hitTest: true, hand: fal
 
 function DraggablePDF({ id, removePDF, initialPosition, file }) {
   // Empêche le déplacement du PDF dans la zone d'exclusion
-  useFrame(() => {
+  // Exclusion uniquement au relâchement
+  const handleExclusion = () => {
     if (meshRef.current && window.__xr_anchor) {
       const anchor = window.__xr_anchor;
       const exclusionZoneSize = 1;
-      // Récupère la position globale du PDF
-      const worldPos = new THREE.Vector3();
-      meshRef.current.getWorldPosition(worldPos);
-      if (
-        Math.abs(worldPos.x - anchor.x) < exclusionZoneSize / 2 &&
-        Math.abs(worldPos.y - anchor.y) < exclusionZoneSize / 2 &&
-        Math.abs(worldPos.z - anchor.z) < exclusionZoneSize / 2
-      ) {
-        // Repousse le PDF en dehors de la zone
-        const direction = new THREE.Vector3().subVectors(worldPos, anchor).normalize();
-        const newWorldPos = anchor.clone().add(direction.multiplyScalar(exclusionZoneSize / 2 + 0.01));
-        // Pour déplacer le mesh à la nouvelle position monde, il faut convertir en coordonnées locales si le mesh a un parent
+      meshRef.current.geometry.computeBoundingBox();
+      const bbox = meshRef.current.geometry.boundingBox.clone();
+      bbox.applyMatrix4(meshRef.current.matrixWorld);
+      const zoneMin = new THREE.Vector3(
+        anchor.x - exclusionZoneSize / 2,
+        anchor.y - exclusionZoneSize / 2,
+        anchor.z - exclusionZoneSize / 2
+      );
+      const zoneMax = new THREE.Vector3(
+        anchor.x + exclusionZoneSize / 2,
+        anchor.y + exclusionZoneSize / 2,
+        anchor.z + exclusionZoneSize / 2
+      );
+      const exclusionBox = new THREE.Box3(zoneMin, zoneMax);
+      if (bbox.intersectsBox(exclusionBox)) {
+        console.log(`PDF ${id} (bbox) détecté dans la zone d'exclusion autour de l'ancre (${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}, ${anchor.z.toFixed(2)}) | BBox PDF: min(${bbox.min.x.toFixed(2)},${bbox.min.y.toFixed(2)},${bbox.min.z.toFixed(2)}) max(${bbox.max.x.toFixed(2)},${bbox.max.y.toFixed(2)},${bbox.max.z.toFixed(2)})`);
+        // Place le PDF au-dessus de la zone d'exclusion (modifie uniquement l'axe Y)
+        // On prend la position monde actuelle pour x et z
+        const currentWorldPos = new THREE.Vector3();
+        meshRef.current.getWorldPosition(currentWorldPos);
+        const newWorldPos = currentWorldPos.clone();
+        newWorldPos.y = anchor.y + exclusionZoneSize / 2 + (bbox.max.y - bbox.min.y) / 2 + 0.2;
         if (meshRef.current.parent) {
           meshRef.current.position.copy(meshRef.current.parent.worldToLocal(newWorldPos));
         } else {
@@ -36,7 +48,7 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
         }
       }
     }
-  });
+  };
   const { camera} = useThree();
   const isDraggingRef = useRef(false)
   const isPressing = useRef(false);
@@ -163,8 +175,9 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
         e.stopPropagation()
       }}
       onPointerUp={(e) => {
-        isDraggingRef.current = false
-        e.stopPropagation()
+        isDraggingRef.current = false;
+        handleExclusion();
+        e.stopPropagation();
       }}
     >
       <planeGeometry args={[1.5, 2]} />
@@ -341,7 +354,7 @@ function App() {
     return (
       <mesh position={anchor}>
         <boxGeometry args={[size, size, size]} />
-        <meshStandardMaterial color="red" transparent opacity={0.2} />
+        <meshStandardMaterial color="red" transparent opacity={1} />
       </mesh>
     );
   }
@@ -359,7 +372,7 @@ function App() {
   }, [anchor]);
 
   // Taille de la zone d'exclusion (1m x 1m x 1m)
-  const exclusionZoneSize = 1;
+  const exclusionZoneSize = 0.5;
 
   // Vérifie si une position est dans la zone d'exclusion autour de l'ancre
   const isInExclusionZone = (position) => {
@@ -387,7 +400,7 @@ function App() {
       .then(setPdfList)
       .catch((err) => console.error("Erreur chargement PDF:", err));
   }, []);
-
+ 
   const addPDF = (newFile) => {
     if (!newFile || !anchor) return;
     const fileURL = `/${newFile}`;
@@ -418,19 +431,39 @@ function App() {
 
   return (
     <div className='globalDisplay'>
-      <button
-        onClick={async () => {
-          try {
-            await store.enterAR();
-            console.log("✅ Entered AR session");
-            setXRStarted(true);
-          } catch (err) {
-            console.error("❌ Failed to enter AR", err);
-          }
-        }}
-      >
-        Enter AR
-      </button>
+      <header className="header-bar">
+          <img src="/logoSafranc.webp" alt="Logo Safran" className="logo-safran" />
+          <h1 className="app-title">Projet VR</h1>
+          <div className="header-right">
+            <span className="matricule">Matricule Fictif</span>
+            <span className="power-btn">
+              <svg width="60" height="60" viewBox="0 0 60 60">
+                <circle cx="30" cy="30" r="25" stroke="white" strokeWidth="5" fill="none" />
+                <rect x="27.5" y="10" width="5" height="20" rx="2.5" fill="white" />
+              </svg>
+            </span>
+          </div>
+        </header>
+        <div className="main-content">
+          <p className="instruction-text">
+            Pour entrer dans la version réalité augmentée de l’application cliquez sur le<br />
+            bouton si dessous dans votre casque de réalité virtuelle:
+          </p>
+          <button
+            className="enter-ar-btn"
+            onClick={async () => {
+              try {
+                await store.enterAR();
+                console.log("✅ Entered AR session");
+                setXRStarted(true);
+              } catch (err) {
+                console.error("❌ Failed to enter AR", err);
+              }
+            }}
+          >
+            Enter AR
+          </button>
+        </div>
       <Canvas >
         <ambientLight intensity={0.5} />
         <XR store={store} referenceSpace="local-floor">
