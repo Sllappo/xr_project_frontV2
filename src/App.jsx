@@ -430,7 +430,7 @@ function App() {
   };
 
   return (
-    <div className='globalDisplay'>
+    <div className='global-display'>
       <header className="header-bar">
           <img src="/logoSafranc.webp" alt="Logo Safran" className="logo-safran" />
           <h1 className="app-title">Projet VR</h1>
