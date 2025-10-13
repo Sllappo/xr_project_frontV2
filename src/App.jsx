@@ -1,3 +1,5 @@
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
+import '@tensorflow/tfjs';
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { XR, createXRStore, useXR, useXRInputSourceState, useXRHitTest } from '@react-three/xr'
 import { useState, useRef, useEffect } from 'react'
@@ -11,6 +13,45 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pd
 
 
 const store = createXRStore({ controller: {left:false}, hitTest: true, hand: false})
+
+// Composant de détection d'écran
+function ScreenDetector({ onScreenDetected }) {
+  const videoRef = useRef();
+  useEffect(() => {
+    let stream;
+    async function setupCamera() {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    }
+    setupCamera();
+
+    let model;
+    cocoSsd.load().then((loadedModel) => {
+      model = loadedModel;
+      detectFrame();
+    });
+
+    async function detectFrame() {
+      if (model && videoRef.current) {
+        const predictions = await model.detect(videoRef.current);
+        predictions.forEach(pred => {
+          if (["tv", "laptop", "monitor"].includes(pred.class)) {
+            console.log('Écran détecté !', pred);
+            if (onScreenDetected) onScreenDetected(pred);
+          }
+        });
+        requestAnimationFrame(detectFrame);
+      }
+    }
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [onScreenDetected]);
+  return <video ref={videoRef} width={640} height={480} autoPlay muted style={{display:'block',margin:'40px auto',borderRadius:'12px'}} />;
+}
 
 function DraggablePDF({ id, removePDF, initialPosition, file }) {
   // Empêche le déplacement du PDF dans la zone d'exclusion
@@ -348,49 +389,62 @@ function AnchorVisual({ anchor, onConfirm }) {
 }
 
 function App() {
+  const [xrStarted, setXRStarted] = useState(false);
+  const [screenDetected, setScreenDetected] = useState(null);
+  const [hasAnchored, setHasAnchored] = useState(false);
+  const [anchor, setAnchor] = useState(null);
+  const [pdfList, setPdfList] = useState([]);
+  
   // Visualisation de la zone d'exclusion autour de l'ancre
   function ExclusionZone({ anchor, size }) {
     if (!anchor) return null;
-    return (
-      <mesh position={anchor}>
-        <boxGeometry args={[size, size, size]} />
-        <meshStandardMaterial color="red" transparent opacity={1} />
-      </mesh>
-    );
-  }
-  const [pdfs, setPDFs] = useState([]);
-  const [pdfList, setPdfList] = useState([]);
-  const [anchor, setAnchor] = useState(null);
-  const [hasAnchored, setHasAnchored] = useState(false);
-  const [xrStarted, setXRStarted] = useState(false);
-
-  // Stocke l'ancre dans window pour accès global
-  useEffect(() => {
-    if (anchor) {
-      window.__xr_anchor = anchor;
+    if (!showAR) {
+      return (
+        <div className="main-bg">
+          <header className="header-bar">
+            <img src="/logoSafranc.webp" alt="Logo Safran" className="logo-safran" />
+            <h1 className="app-title">Projet VR</h1>
+            <div className="header-right">
+              <span className="matricule">Matricule Fictif</span>
+              <span className="power-btn">
+                <svg width="60" height="60" viewBox="0 0 60 60">
+                  <circle cx="30" cy="30" r="25" stroke="white" strokeWidth="5" fill="none" />
+                  <rect x="27.5" y="10" width="5" height="20" rx="2.5" fill="white" />
+                </svg>
+              </span>
+            </div>
+          </header>
+          <div className="main-content">
+            <p className="instruction-text">
+              Pour entrer dans la version réalité augmentée de l’application, détectez d'abord un écran puis cliquez sur le bouton ci-dessous dans votre casque de réalité virtuelle :
+            </p>
+            {!screenDetected && (
+              <ScreenDetector onScreenDetected={setScreenDetected} />
+            )}
+            {screenDetected && (
+              <div style={{textAlign:'center',marginBottom:'30px'}}>
+                <p style={{color:'#fff',fontSize:'1.2rem'}}>Écran détecté : <b>{screenDetected.class}</b></p>
+                <button
+                  className="enter-ar-btn"
+                  onClick={async () => {
+                    try {
+                      await store.enterAR();
+                      console.log("✅ Entered AR session");
+                      setShowAR(true);
+                      setXRStarted(true);
+                    } catch (err) {
+                      console.error("❌ Failed to enter AR", err);
+                    }
+                  }}
+                >
+                  Enter AR
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      );
     }
-  }, [anchor]);
-
-  // Taille de la zone d'exclusion (1m x 1m x 1m)
-  const exclusionZoneSize = 0.5;
-
-  // Vérifie si une position est dans la zone d'exclusion autour de l'ancre
-  const isInExclusionZone = (position) => {
-    if (!anchor) return false;
-    let posVec;
-    if (Array.isArray(position)) {
-      posVec = new THREE.Vector3(...position);
-    } else if (position instanceof THREE.Vector3) {
-      posVec = position;
-    } else {
-      // fallback
-      return false;
-    }
-    return (
-      Math.abs(posVec.x - anchor.x) < exclusionZoneSize / 2 &&
-      Math.abs(posVec.y - anchor.y) < exclusionZoneSize / 2 &&
-      Math.abs(posVec.z - anchor.z) < exclusionZoneSize / 2
-    );
   };
 
 

@@ -13,6 +13,8 @@
     "@react-three/drei": "^10.0.7",
     "@react-three/fiber": "^9.1.2",
     "@react-three/xr": "^6.6.16",
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs": "^4.22.0",
     "@types/three": "^0.176.0",
     "@zxing/browser": "^0.1.5",
     "dotenv": "^16.5.0",
