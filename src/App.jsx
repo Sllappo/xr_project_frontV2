@@ -299,44 +299,69 @@ function VRMenu({ addPDF, pdfList }) {
   );
 }
 
-function ManualHitTestAnchor({ setAnchor, hasAnchored }) {
+function ManualHitTestAnchor({ setAnchor, hasAnchored, setViewerPoseData }) {
   const { session } = useXR();
   const hitTestSourceRef = useRef(null);
   const viewerRefSpaceRef = useRef(null);
+  const localRefSpace = useRef(null);
 
   useEffect(() => {
     if (!session) return;
-
     let cancelled = false;
+
+    // expose session globally pour qu'on puisse end() depuis App quand on doit capturer
+    window.__xr_session = session;
 
     const init = async () => {
       const viewerSpace = await session.requestReferenceSpace("viewer");
       viewerRefSpaceRef.current = viewerSpace;
+      localRefSpace.current = await session.requestReferenceSpace("local-floor");
 
       const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
       hitTestSourceRef.current = hitTestSource;
       console.log("📡 Manual hit test source created");
 
       const onXRFrame = (time, frame) => {
-        if (cancelled || !viewerRefSpaceRef.current || !hitTestSourceRef.current) return;
-
-        const viewerPose = frame.getViewerPose(viewerRefSpaceRef.current);
-        if (!viewerPose) {
+        if (cancelled) return;
+        if (!viewerRefSpaceRef.current || !hitTestSourceRef.current) {
           session.requestAnimationFrame(onXRFrame);
           return;
         }
 
-        const results = frame.getHitTestResults(hitTestSourceRef.current);
-        if (results.length > 0 && !hasAnchored) {
-          const pose = results[0].getPose(viewerRefSpaceRef.current);
-          if (pose) {
-            const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
-            const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
-            console.log("🎯 Manual hit set anchor:", pos);
-            setAnchor(pos);
+        const viewerPose = frame.getViewerPose(localRefSpace.current); // local-floor relative
+        // store latest viewerPose (position + projection matrix) for later use
+        if (viewerPose && viewerPose.views && viewerPose.views.length) {
+          const vp = viewerPose.views[0];
+          const projectionMatrix = Array.from(vp.projectionMatrix);
+          const transform = {
+            position: {
+              x: vp.transform.position.x,
+              y: vp.transform.position.y,
+              z: vp.transform.position.z
+            },
+            orientation: {
+              x: vp.transform.orientation.x,
+              y: vp.transform.orientation.y,
+              z: vp.transform.orientation.z,
+              w: vp.transform.orientation.w
+            }
+          };
+          // callback up to parent
+          if (setViewerPoseData) {
+            setViewerPoseData({ transform, projectionMatrix });
           }
         }
 
+        // hit test for anchor suggestion
+        const results = frame.getHitTestResults(hitTestSourceRef.current);
+        if (results.length > 0 && !hasAnchored) {
+          const pose = results[0].getPose(localRefSpace.current);
+          if (pose) {
+            const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
+            const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
+            setAnchor(pos);
+          }
+        }
         session.requestAnimationFrame(onXRFrame);
       };
 
@@ -347,46 +372,14 @@ function ManualHitTestAnchor({ setAnchor, hasAnchored }) {
 
     return () => {
       cancelled = true;
-      if (hitTestSourceRef.current?.cancel) {
-        hitTestSourceRef.current.cancel();
-      }
+      window.__xr_session = null;
+      if (hitTestSourceRef.current?.cancel) hitTestSourceRef.current.cancel();
     };
-  }, [session, hasAnchored, setAnchor]);
+  }, [session, hasAnchored, setAnchor, setViewerPoseData]);
 
   return null;
 }
 
-
-
-function AnchorVisual({ anchor, onConfirm }) {
-  if (!anchor) {
-    console.log("🟠 AnchorVisual: Pas d'ancre, sphère rouge affichée à [0, 1.2, -1]");
-    return (
-      <mesh position={[0, 1.2, -1]}>
-        <sphereGeometry args={[0.05, 16, 16]} />
-        <meshStandardMaterial color="red" />
-      </mesh>
-    );
-  }
-
-  console.log("🟢 AnchorVisual: Ancre trouvée à", anchor);
-  return (
-    <group>
-      <mesh position={anchor}>
-        <sphereGeometry args={[0.05, 16, 16]} />
-        <meshStandardMaterial color="orange" />
-      </mesh>
-      <Text
-        position={anchor.clone().add(new THREE.Vector3(0, 0.15, 0))}
-        fontSize={0.05}
-        color="white"
-        onClick={onConfirm}
-      >
-        📌 Définir ici
-      </Text>
-    </group>
-  );
-}
 
 function App() {
   const [xrStarted, setXRStarted] = useState(false);
