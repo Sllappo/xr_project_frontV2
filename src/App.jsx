@@ -22,6 +22,8 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
       meshRef.current.geometry.computeBoundingBox();
       const bbox = meshRef.current.geometry.boundingBox.clone();
       bbox.applyMatrix4(meshRef.current.matrixWorld);
+
+      // Création de la box d’exclusion
       const zoneMin = new THREE.Vector3(
         anchor.x - exclusionZoneSize / 2,
         anchor.y - exclusionZoneSize / 2,
@@ -33,22 +35,29 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
         anchor.z + exclusionZoneSize / 2
       );
       const exclusionBox = new THREE.Box3(zoneMin, zoneMax);
+
+      // Si le PDF intersecte la zone
       if (bbox.intersectsBox(exclusionBox)) {
-        console.log(`PDF ${id} (bbox) détecté dans la zone d'exclusion autour de l'ancre (${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}, ${anchor.z.toFixed(2)}) | BBox PDF: min(${bbox.min.x.toFixed(2)},${bbox.min.y.toFixed(2)},${bbox.min.z.toFixed(2)}) max(${bbox.max.x.toFixed(2)},${bbox.max.y.toFixed(2)},${bbox.max.z.toFixed(2)})`);
-        // Place le PDF au-dessus de la zone d'exclusion (modifie uniquement l'axe Y)
-        // On prend la position monde actuelle pour x et z
+        console.log(`🚫 PDF ${id} détecté dans la zone d'exclusion — repositionnement.`);
+
+        // Récupère la position actuelle en coordonnées monde
         const currentWorldPos = new THREE.Vector3();
         meshRef.current.getWorldPosition(currentWorldPos);
+
+        // Hauteur fixe au-dessus du centre de la zone
+        const fixedOffsetY = 0.5;
+
+        // Nouvelle position : même X/Z, Y ajusté
         const newWorldPos = currentWorldPos.clone();
-        newWorldPos.y = anchor.y + exclusionZoneSize / 2 + (bbox.max.y - bbox.min.y) / 2 + 0.2;
-        if (meshRef.current.parent) {
-          meshRef.current.position.copy(meshRef.current.parent.worldToLocal(newWorldPos));
-        } else {
-          meshRef.current.position.copy(newWorldPos);
-        }
+        newWorldPos.y = anchor.y + exclusionZoneSize / 2 + fixedOffsetY;
+
+        // Applique directement la position en monde, sans conversion
+        setWorldPosition(meshRef.current, newWorldPos);
       }
     }
   };
+
+
   const { camera} = useThree();
   const isDraggingRef = useRef(false)
   const isPressing = useRef(false);
@@ -117,6 +126,12 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
     const thumbstick = rightController.gamepad["xr-standard-thumbstick"];
     if (thumbstick && isDraggingRef.current) {
       grabDistanceRef.current -= (thumbstick.yAxis ?? 0) * 0.05
+      // Agrandissement / réduction avec axe X
+      const scaleChange = (thumbstick.xAxis ?? 0) * 0.02; // vitesse de zoom
+      const newScale = meshRef.current.scale.x + scaleChange;
+
+      // Clamp pour éviter un zoom négatif ou trop petit
+      meshRef.current.scale.setScalar(Math.max(0.2, Math.min(3, newScale)));
     }
   });
 
@@ -126,18 +141,18 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
 
     const buttons = rightController.inputSource.gamepad.buttons;
 
-    if (buttons[1]?.pressed && isDraggingRef.current) {
+    if (buttons[5]?.pressed && isDraggingRef.current) {
       removePDF(id);
     }
 
     if (buttons[4]?.pressed && !isPressing.current && isDraggingRef.current) {
-      goToPage(currentPage + 1);
-      isPressing.current = true;
-    }
-
-    if (buttons[5]?.pressed && !isPressing.current && isDraggingRef.current) {
-      goToPage(currentPage - 1);
-      isPressing.current = true;
+      if (currentPage == numPages) {
+        goToPage(1);
+        isPressing.current = true;
+      } else {
+        goToPage(currentPage + 1);
+        isPressing.current = true;
+      }
     }
 
     if (!buttons[4]?.pressed && !buttons[5]?.pressed && isPressing.current) {
@@ -184,6 +199,18 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
       <meshStandardMaterial map={texture.current} transparent opacity={0.95} toneMapped={false} />
     </mesh>
   )
+}
+
+function setWorldPosition(obj, worldPos) {
+  // s'assurer que les matrices monde/parent sont à jour
+  obj.updateMatrixWorld(true);
+  if (obj.parent) {
+    const localPos = worldPos.clone();
+    obj.parent.worldToLocal(localPos); // convert world -> local
+    obj.position.copy(localPos);
+  } else {
+    obj.position.copy(worldPos);
+  }
 }
 
 function VRMenu({ addPDF, pdfList }) {
@@ -348,6 +375,12 @@ function AnchorVisual({ anchor, onConfirm }) {
 }
 
 function App() {
+  const [pdfs, setPDFs] = useState([]);
+  const [pdfList, setPdfList] = useState([]);
+  const [anchor, setAnchor] = useState(null);
+  const [hasAnchored, setHasAnchored] = useState(false);
+  const [xrStarted, setXRStarted] = useState(false);
+  
   // Visualisation de la zone d'exclusion autour de l'ancre
   function ExclusionZone({ anchor, size }) {
     if (!anchor) return null;
@@ -358,12 +391,6 @@ function App() {
       </mesh>
     );
   }
-  const [pdfs, setPDFs] = useState([]);
-  const [pdfList, setPdfList] = useState([]);
-  const [anchor, setAnchor] = useState(null);
-  const [hasAnchored, setHasAnchored] = useState(false);
-  const [xrStarted, setXRStarted] = useState(false);
-
   // Stocke l'ancre dans window pour accès global
   useEffect(() => {
     if (anchor) {
