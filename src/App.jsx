@@ -1,184 +1,427 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { XR, createXRStore, useXR, useXRInputSourceState, useXRHitTest } from '@react-three/xr'
+import { XR, createXRStore, useXR, useXRInputSourceState } from '@react-three/xr'
 import { useState, useRef, useEffect } from 'react'
-import { Plane, Text } from "@react-three/drei";
+import { Plane, Text } from "@react-three/drei"
 import * as THREE from 'three'
-import { pdfjs } from "react-pdf";
+import { pdfjs } from "react-pdf"
 import './App.css'
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.mjs`;
-
-
+pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.mjs`
 
 const store = createXRStore({ controller: {left:false}, hitTest: true, hand: false})
+const cv = window.cv
+
+// Composant pour le rayon de sélection du contrôleur
+function ControllerRay({ isActive }) {
+  const rightController = useXRInputSourceState("controller", "right")
+  const lineRef = useRef()
+
+  useFrame(() => {
+    if (!rightController?.object || !lineRef.current || !isActive) return
+
+    const controller = rightController.object
+    const direction = new THREE.Vector3(0, 0, -1)
+    direction.applyQuaternion(controller.quaternion)
+    
+    const start = controller.position.clone()
+    const end = start.clone().add(direction.multiplyScalar(10))
+    
+    lineRef.current.geometry.setFromPoints([start, end])
+  })
+
+  if (!isActive) return null
+
+  return (
+    <line ref={lineRef}>
+      <bufferGeometry />
+      <lineBasicMaterial color="cyan" linewidth={2} />
+    </line>
+  )
+}
+
+function AutoScreenDetector({ onAnchorSet }) {
+  const { getFrame } = useVisionCamera()
+  const { camera } = useThree()
+
+  useFrame(() => {
+    const canvas = getFrame()
+    if (!canvas || !window.cv || !window.cv.imread) return
+
+    const mat = cv.imread(canvas) // ✅ correct
+    const corners = detectScreen(mat)
+    if (!corners) {
+      mat.delete()
+      return
+    }
+
+    const pose = estimatePose(corners, 0.6, 0.34, cameraMatrix)
+
+    const position = new THREE.Vector3(
+      pose.tvec.data32F[0],
+      pose.tvec.data32F[1],
+     -pose.tvec.data32F[2]
+    )
+
+    mat.delete()
+    pose.rvec.delete()
+    pove.tvec.delete()
+    onAnchorSet(position)
+  })
+
+  return (
+    <Text position={[0,2,-1]} fontSize={0.08} color="cyan">
+      🔍 Recherche d’écran…
+    </Text>
+  )
+}
+
+// Composant pour la sélection manuelle de l'écran
+function ManualScreenSelector({ onAnchorSet }) {
+  const [isSelecting, setIsSelecting] = useState(true)
+  const [targetPoint, setTargetPoint] = useState(null)
+  const rightController = useXRInputSourceState("controller", "right")
+  const isPressing = useRef(false)
+  const { scene } = useThree()
+
+  useFrame(() => {
+    if (!rightController?.inputSource?.gamepad || !isSelecting) return
+
+    const buttons = rightController.inputSource.gamepad.buttons
+    
+    // Trigger pressé - on définit le point cible
+    if (buttons[0]?.pressed && !isPressing.current) {
+      isPressing.current = true
+      
+      // Récupérer la position et direction du contrôleur
+      const controller = rightController.object
+      if (!controller) return
+
+      const raycaster = new THREE.Raycaster()
+      const direction = new THREE.Vector3(0, 0, -1)
+      direction.applyQuaternion(controller.quaternion)
+      
+      raycaster.set(controller.position, direction)
+      
+      // Créer un grand plan invisible pour détecter l'intersection
+      const planeGeometry = new THREE.PlaneGeometry(100, 100)
+      const planeMaterial = new THREE.MeshBasicMaterial({ 
+        visible: false, 
+        side: THREE.DoubleSide 
+      })
+      const detectionPlane = new THREE.Mesh(planeGeometry, planeMaterial)
+      
+      // Orienter le plan selon la direction du regard
+      detectionPlane.position.set(0, 1.5, -2)
+      detectionPlane.lookAt(controller.position)
+      scene.add(detectionPlane)
+      
+      const intersects = raycaster.intersectObject(detectionPlane)
+      
+      if (intersects.length > 0) {
+        const point = intersects[0].point
+        setTargetPoint(point)
+        console.log("🎯 Point cible détecté:", point)
+      }
+      
+      scene.remove(detectionPlane)
+      planeGeometry.dispose()
+      planeMaterial.dispose()
+    }
+
+    // Bouton relâché
+    if (!buttons[0]?.pressed && isPressing.current) {
+      isPressing.current = false
+    }
+
+    // Bouton A (ou X) pour confirmer
+    if (buttons[4]?.pressed && targetPoint && !isPressing.current) {
+      console.log("✅ Ancrage confirmé à:", targetPoint)
+      onAnchorSet(targetPoint)
+      setIsSelecting(false)
+      isPressing.current = true
+    }
+  })
+
+  if (!isSelecting) return null
+
+  return (
+    <>
+      <ControllerRay isActive={isSelecting} />
+      
+      {/* Instructions flottantes */}
+      <Text
+        position={[0, 2.2, -1.5]}
+        fontSize={0.08}
+        color="white"
+        anchorX="center"
+        anchorY="middle"
+      >
+        🎯 Pointez vers votre écran
+      </Text>
+      
+      <Text
+        position={[0, 2.05, -1.5]}
+        fontSize={0.06}
+        color="cyan"
+        anchorX="center"
+        anchorY="middle"
+      >
+        Trigger: Viser | Bouton A: Confirmer
+      </Text>
+
+      {/* Visualisation du point cible */}
+      {targetPoint && (
+        <group>
+          <mesh position={targetPoint}>
+            <sphereGeometry args={[0.05, 16, 16]} />
+            <meshStandardMaterial color="lime" emissive="lime" emissiveIntensity={0.5} />
+          </mesh>
+          
+          {/* Cercle de confirmation autour du point */}
+          <mesh position={targetPoint} rotation={[Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.08, 0.12, 32]} />
+            <meshBasicMaterial color="lime" transparent opacity={0.6} side={THREE.DoubleSide} />
+          </mesh>
+
+          <Text
+            position={[targetPoint.x, targetPoint.y + 0.2, targetPoint.z]}
+            fontSize={0.05}
+            color="lime"
+            anchorX="center"
+          >
+            ✅ Appuyez sur A pour confirmer
+          </Text>
+        </group>
+      )}
+    </>
+  )
+}
+
+// Composant pour gérer les Spatial Anchors persistants
+function PersistentAnchor({ position, onRestored }) {
+  const { session } = useXR()
+  const [anchorCreated, setAnchorCreated] = useState(false)
+
+  useEffect(() => {
+    if (!session || !position || anchorCreated) return
+
+    const createAnchor = async () => {
+      try {
+        const referenceSpace = await session.requestReferenceSpace('local-floor')
+        
+        // Créer un XRRigidTransform à partir de la position
+        const transform = new XRRigidTransform(
+          { x: position.x, y: position.y, z: position.z },
+          { x: 0, y: 0, z: 0, w: 1 }
+        )
+
+        // Créer l'ancre
+        const anchor = await session.createAnchor(transform, referenceSpace)
+        
+        if (anchor) {
+          console.log("🔗 Spatial Anchor créé avec succès")
+          
+          // Sauvegarder dans localStorage pour persistance
+          const anchorData = {
+            position: { x: position.x, y: position.y, z: position.z },
+            timestamp: Date.now()
+          }
+          localStorage.setItem('screenAnchor', JSON.stringify(anchorData))
+          
+          setAnchorCreated(true)
+        }
+      } catch (error) {
+        console.warn("⚠️ Spatial Anchors non supporté, utilisation de localStorage uniquement", error)
+        
+        // Fallback: sauvegarder uniquement dans localStorage
+        const anchorData = {
+          position: { x: position.x, y: position.y, z: position.z },
+          timestamp: Date.now()
+        }
+        localStorage.setItem('screenAnchor', JSON.stringify(anchorData))
+        setAnchorCreated(true)
+      }
+    }
+
+    createAnchor()
+  }, [session, position, anchorCreated])
+
+  // Restaurer l'ancre au démarrage
+  useEffect(() => {
+    const savedAnchor = localStorage.getItem('screenAnchor')
+    if (savedAnchor && onRestored) {
+      const anchorData = JSON.parse(savedAnchor)
+      const pos = new THREE.Vector3(
+        anchorData.position.x,
+        anchorData.position.y,
+        anchorData.position.z
+      )
+      console.log("📌 Ancre restaurée depuis localStorage:", pos)
+      onRestored(pos)
+    }
+  }, [onRestored])
+
+  return null
+}
 
 function DraggablePDF({ id, removePDF, initialPosition, file }) {
-  // Empêche le déplacement du PDF dans la zone d'exclusion
-  // Exclusion uniquement au relâchement
   const handleExclusion = () => {
     if (meshRef.current && window.__xr_anchor) {
-      const anchor = window.__xr_anchor;
-      const exclusionZoneSize = 1;
-      meshRef.current.geometry.computeBoundingBox();
-      const bbox = meshRef.current.geometry.boundingBox.clone();
-      bbox.applyMatrix4(meshRef.current.matrixWorld);
+      const anchor = window.__xr_anchor
+      const exclusionZoneSize = 1
+      meshRef.current.geometry.computeBoundingBox()
+      const bbox = meshRef.current.geometry.boundingBox.clone()
+      bbox.applyMatrix4(meshRef.current.matrixWorld)
 
-      // Création de la box d’exclusion
       const zoneMin = new THREE.Vector3(
         anchor.x - exclusionZoneSize / 2,
         anchor.y - exclusionZoneSize / 2,
         anchor.z - exclusionZoneSize / 2
-      );
+      )
       const zoneMax = new THREE.Vector3(
         anchor.x + exclusionZoneSize / 2,
         anchor.y + exclusionZoneSize / 2,
         anchor.z + exclusionZoneSize / 2
-      );
-      const exclusionBox = new THREE.Box3(zoneMin, zoneMax);
+      )
+      const exclusionBox = new THREE.Box3(zoneMin, zoneMax)
 
-      // Si le PDF intersecte la zone
       if (bbox.intersectsBox(exclusionBox)) {
-        console.log(`🚫 PDF ${id} détecté dans la zone d'exclusion — repositionnement.`);
+        console.log(`🚫 PDF ${id} détecté dans la zone d'exclusion — repositionnement.`)
 
-        // Récupère la position actuelle en coordonnées monde
-        const currentWorldPos = new THREE.Vector3();
-        meshRef.current.getWorldPosition(currentWorldPos);
+        const currentWorldPos = new THREE.Vector3()
+        meshRef.current.getWorldPosition(currentWorldPos)
 
-        // Hauteur fixe au-dessus du centre de la zone
-        const fixedOffsetY = 0.5;
+        const fixedOffsetY = 1
 
-        // Nouvelle position : même X/Z, Y ajusté
-        const newWorldPos = currentWorldPos.clone();
-        newWorldPos.y = anchor.y + exclusionZoneSize / 2 + fixedOffsetY;
+        const newWorldPos = currentWorldPos.clone()
+        newWorldPos.y = anchor.y + exclusionZoneSize / 2 + fixedOffsetY
 
-        // Applique directement la position en monde, sans conversion
-        setWorldPosition(meshRef.current, newWorldPos);
+        setWorldPosition(meshRef.current, newWorldPos)
       }
     }
-  };
+  }
 
-
-  const { camera} = useThree();
+  const { camera } = useThree()
   const isDraggingRef = useRef(false)
-  const isPressing = useRef(false);
+  const isPressing = useRef(false)
   const grabDistanceRef = useRef(1.5)
   const meshRef = useRef(null)
-  const [numPages, setNumPages] = useState(1);
-  const [currentPage, setCurrentPage] = useState(1);
-  const texture = useRef(new THREE.Texture());
-  const rightController = useXRInputSourceState("controller", "right");
-  const [forceRender, setForceRender] = useState(0);
-  const BACK_URL= import.meta.env.VITE_JAVA_BACK_URL;
+  const [numPages, setNumPages] = useState(1)
+  const [currentPage, setCurrentPage] = useState(1)
+  const texture = useRef(new THREE.Texture())
+  const rightController = useXRInputSourceState("controller", "right")
+  const [forceRender, setForceRender] = useState(0)
+  const BACK_URL = import.meta.env.VITE_JAVA_BACK_URL
+
   useFrame(() => {
     if (forceRender > 0) {
-      setForceRender(forceRender - 1);
+      setForceRender(forceRender - 1)
     }
-  });
-
-
-  useEffect(() => {
-  if (!file) return;
-
-  fetch(`${BACK_URL}/api/pdf-info?filename=${encodeURIComponent(file)}`)
-    .then(res => res.json())
-    .then(data => {
-      if (data.pages) {
-        setNumPages(data.pages);
-      } else {
-        console.warn("Erreur récupération info PDF :", data.error);
-      }
-    })
-    .catch(err => {
-      console.error("Erreur appel PDF info :", err);
-    });
-}, [file]);
+  })
 
   useEffect(() => {
-  if (!file || !currentPage) return;
+    if (!file) return
 
-  fetch(`${BACK_URL}/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
-    .then(res => res.blob())
-    .then(blob => createImageBitmap(blob))
-    .then(imageBitmap => {
-      texture.current.image = imageBitmap;
-      texture.current.needsUpdate = true;
-    })
-    .catch(err => console.error("Erreur chargement PDF depuis serveur :", err));
-}, [file, currentPage]);
+    fetch(`${BACK_URL}/api/pdf-info?filename=${encodeURIComponent(file)}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.pages) {
+          setNumPages(data.pages)
+        } else {
+          console.warn("Erreur récupération info PDF :", data.error)
+        }
+      })
+      .catch(err => {
+        console.error("Erreur appel PDF info :", err)
+      })
+  }, [file])
 
+  useEffect(() => {
+    if (!file || !currentPage) return
+
+    fetch(`${BACK_URL}/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
+      .then(res => res.blob())
+      .then(blob => createImageBitmap(blob))
+      .then(imageBitmap => {
+        texture.current.image = imageBitmap
+        texture.current.needsUpdate = true
+      })
+      .catch(err => console.error("Erreur chargement PDF depuis serveur :", err))
+  }, [file, currentPage])
 
   const goToPage = (newPage) => {
     if (newPage >= 1 && newPage <= numPages) {
-      setCurrentPage(newPage);
+      setCurrentPage(newPage)
     }
-  };
+  }
 
-  // Make the doc to always look at the camera
   useFrame(() => {
     if (meshRef.current) {
-      meshRef.current.lookAt(camera.position);
+      meshRef.current.lookAt(camera.position)
     }
-  });
+  })
 
-  // Movement with the stick
   useFrame(() => {
-    if (!meshRef.current || !rightController) return;
-    const thumbstick = rightController.gamepad["xr-standard-thumbstick"];
-    if (thumbstick && isDraggingRef.current) {
-      grabDistanceRef.current -= (thumbstick.yAxis ?? 0) * 0.05
-      // Agrandissement / réduction avec axe X
-      const scaleChange = (thumbstick.xAxis ?? 0) * 0.02; // vitesse de zoom
-      const newScale = meshRef.current.scale.x + scaleChange;
+    if (!meshRef.current || !rightController) return
+    const thumbstick = rightController.gamepad["xr-standard-thumbstick"]
+    if (!thumbstick || !isDraggingRef.current) return
 
-      // Clamp pour éviter un zoom négatif ou trop petit
-      meshRef.current.scale.setScalar(Math.max(0.2, Math.min(3, newScale)));
+    const x = thumbstick.xAxis ?? 0
+    const y = thumbstick.yAxis ?? 0
+
+    const deadzone = 0.05
+    const absX = Math.abs(x)
+    const absY = Math.abs(y)
+
+    if (absY > absX && absY > deadzone) {
+      grabDistanceRef.current -= y * 0.05
+    } else if (absX > absY && absX > deadzone) {
+      const scaleChange = x * 0.02
+      const newScale = meshRef.current.scale.x + scaleChange
+      meshRef.current.scale.setScalar(Math.max(0.2, Math.min(3, newScale)))
     }
-  });
+  })
 
-  // Input management
   useFrame(() => {
-    if (!meshRef.current || !rightController?.inputSource?.gamepad) return;
+    if (!meshRef.current || !rightController?.inputSource?.gamepad) return
 
-    const buttons = rightController.inputSource.gamepad.buttons;
+    const buttons = rightController.inputSource.gamepad.buttons
 
     if (buttons[5]?.pressed && isDraggingRef.current) {
-      removePDF(id);
+      removePDF(id)
     }
 
     if (buttons[4]?.pressed && !isPressing.current && isDraggingRef.current) {
       if (currentPage == numPages) {
-        goToPage(1);
-        isPressing.current = true;
+        goToPage(1)
+        isPressing.current = true
       } else {
-        goToPage(currentPage + 1);
-        isPressing.current = true;
+        goToPage(currentPage + 1)
+        isPressing.current = true
       }
     }
 
     if (!buttons[4]?.pressed && !buttons[5]?.pressed && isPressing.current) {
-      isPressing.current = false;
+      isPressing.current = false
     }
-  });
+  })
 
   return (
     <mesh
       ref={meshRef}
+      position={initialPosition}
       onPointerDown={(e) => {
         isDraggingRef.current = true
 
-        // Calculate distance between pointer and document
         const cubeWorldPosition = new THREE.Vector3()
-        console.log(cubeWorldPosition)
         meshRef.current.getWorldPosition(cubeWorldPosition)
 
         const distance = e.ray.origin.distanceTo(cubeWorldPosition)
         grabDistanceRef.current = distance
 
-        // Keep the distance when grabbing
         const targetPosition = e.ray.origin.clone().add(e.ray.direction.clone().multiplyScalar(distance))
         meshRef.current?.position.copy(targetPosition)
 
-        // make the document interactable
         e.stopPropagation()
       }}
       onPointerMove={(e) => {
@@ -190,9 +433,9 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
         e.stopPropagation()
       }}
       onPointerUp={(e) => {
-        isDraggingRef.current = false;
-        handleExclusion();
-        e.stopPropagation();
+        isDraggingRef.current = false
+        handleExclusion()
+        e.stopPropagation()
       }}
     >
       <planeGeometry args={[1.5, 2]} />
@@ -202,46 +445,137 @@ function DraggablePDF({ id, removePDF, initialPosition, file }) {
 }
 
 function setWorldPosition(obj, worldPos) {
-  // s'assurer que les matrices monde/parent sont à jour
-  obj.updateMatrixWorld(true);
+  obj.updateMatrixWorld(true)
   if (obj.parent) {
-    const localPos = worldPos.clone();
-    obj.parent.worldToLocal(localPos); // convert world -> local
-    obj.position.copy(localPos);
+    const localPos = worldPos.clone()
+    obj.parent.worldToLocal(localPos)
+    obj.position.copy(localPos)
   } else {
-    obj.position.copy(worldPos);
+    obj.position.copy(worldPos)
   }
 }
 
-function VRMenu({ addPDF, pdfList }) {
-  const [isMenuOpen, setMenuOpen] = useState(true);
-  const [selectedFile, setSelectedFile] = useState("");
-  const meshRef = useRef();
-  const isPressing = useRef(false);
-  
+function useVisionCamera() {
+  const videoRef = useRef(null)
+  const canvasRef = useRef(null)
 
-  // Get stick state
-  const rightController = useXRInputSourceState("controller", "right");
+  useEffect(() => {
+    const video = document.createElement("video")
+    video.autoplay = true
+    video.playsInline = true
+
+    const canvas = document.createElement("canvas")
+    const ctx = canvas.getContext("2d")
+
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" }
+    }).then(stream => {
+      video.srcObject = stream
+    })
+
+    videoRef.current = video
+    canvasRef.current = canvas
+  }, [])
+
+  const getFrame = () => {
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return null
+
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null
+
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext("2d")
+    ctx.drawImage(video, 0, 0)
+
+    return canvas
+  }
+
+  return { videoRef, getFrame }
+}
+
+export function detectScreen(mat) {
+  const gray = new cv.Mat()
+  const edges = new cv.Mat()
+  const contours = new cv.MatVector()
+  const hierarchy = new cv.Mat()
+
+  cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY)
+  cv.Canny(gray, edges, 80, 150)
+  cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+
+  let best = null
+
+  for (let i = 0; i < contours.size(); i++) {
+    const cnt = contours.get(i)
+    const approx = new cv.Mat()
+
+    cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true)
+
+    if (approx.rows === 4) {
+      best = approx.clone()   // on garde une copie
+    }
+
+    approx.delete()
+    cnt.delete()
+  }
+
+  // 🔥 LIBÉRATION OBLIGATOIRE
+  gray.delete()
+  edges.delete()
+  contours.delete()
+  hierarchy.delete()
+
+  return best
+}
+
+ function estimatePose(corners2D, screenWidth, screenHeight, cameraMatrix) {
+  const objectPoints = cv.matFromArray(4, 1, cv.CV_32FC3, [
+    -screenWidth/2,  screenHeight/2, 0,
+     screenWidth/2,  screenHeight/2, 0,
+     screenWidth/2, -screenHeight/2, 0,
+    -screenWidth/2, -screenHeight/2, 0,
+  ])
+
+  const imagePoints = cv.matFromArray(4, 1, cv.CV_32FC2, corners2D)
+
+  const rvec = new cv.Mat()
+  const tvec = new cv.Mat()
+
+  cv.solvePnP(objectPoints, imagePoints, cameraMatrix, new cv.Mat(), rvec, tvec)
+
+  return { rvec, tvec }
+}
+
+
+
+function VRMenu({ addPDF, pdfList }) {
+  const [isMenuOpen, setMenuOpen] = useState(true)
+  const [selectedFile, setSelectedFile] = useState("")
+  const meshRef = useRef()
+  const isPressing = useRef(false)
+
+  const rightController = useXRInputSourceState("controller", "right")
 
   useFrame(() => {
-    if(meshRef.current == null || rightController == null ){
+    if (meshRef.current == null || rightController == null) {
       return
     }
 
     if (rightController?.inputSource?.gamepad) {
-      const buttons = rightController.inputSource.gamepad.buttons;
+      const buttons = rightController.inputSource.gamepad.buttons
 
-      // Manage the opening and closing of the menu
       if (buttons[4]?.pressed && !isPressing.current && !buttons[0]?.pressed) {
-        setMenuOpen((prev) => !prev);
-        isPressing.current = true;
+        setMenuOpen((prev) => !prev)
+        isPressing.current = true
       }
 
       if (!buttons[4]?.pressed && isPressing.current) {
-        isPressing.current = false;
+        isPressing.current = false
       }
     }
-  });
+  })
 
   return (
     <Plane
@@ -250,7 +584,7 @@ function VRMenu({ addPDF, pdfList }) {
       rotation={[-0.2, 0, 0]}
       visible={isMenuOpen}
     >
-      <meshStandardMaterial ref={meshRef} color="gray" transparent opacity={0.8} />
+      <meshStandardMaterial ref={meshRef} color="gray" transparent opacity={1} />
 
       <Text position={[0, 0.35, 0]} fontSize={0.1}>
         📂 Sélectionner un PDF
@@ -275,236 +609,191 @@ function VRMenu({ addPDF, pdfList }) {
         onClick={() => {
           if (selectedFile) {
             console.log(selectedFile)
-            addPDF(selectedFile);
+            addPDF(selectedFile)
           }
         }}
       >
         ✅ Ajouter
       </Text>
     </Plane>
-  );
+  )
 }
 
-function ManualHitTestAnchor({ setAnchor, hasAnchored }) {
-  const { session } = useXR();
-  const hitTestSourceRef = useRef(null);
-  const viewerRefSpaceRef = useRef(null);
-
-  useEffect(() => {
-    if (!session) return;
-
-    let cancelled = false;
-
-    const init = async () => {
-      const viewerSpace = await session.requestReferenceSpace("viewer");
-      viewerRefSpaceRef.current = viewerSpace;
-
-      const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-      hitTestSourceRef.current = hitTestSource;
-      console.log("📡 Manual hit test source created");
-
-      const onXRFrame = (time, frame) => {
-        if (cancelled || !viewerRefSpaceRef.current || !hitTestSourceRef.current) return;
-
-        const viewerPose = frame.getViewerPose(viewerRefSpaceRef.current);
-        if (!viewerPose) {
-          session.requestAnimationFrame(onXRFrame);
-          return;
-        }
-
-        const results = frame.getHitTestResults(hitTestSourceRef.current);
-        if (results.length > 0 && !hasAnchored) {
-          const pose = results[0].getPose(viewerRefSpaceRef.current);
-          if (pose) {
-            const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
-            const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
-            console.log("🎯 Manual hit set anchor:", pos);
-            setAnchor(pos);
-          }
-        }
-
-        session.requestAnimationFrame(onXRFrame);
-      };
-
-      session.requestAnimationFrame(onXRFrame);
-    };
-
-    init();
-
-    return () => {
-      cancelled = true;
-      if (hitTestSourceRef.current?.cancel) {
-        hitTestSourceRef.current.cancel();
-      }
-    };
-  }, [session, hasAnchored, setAnchor]);
-
-  return null;
-}
-
-
-
-function AnchorVisual({ anchor, onConfirm }) {
-  if (!anchor) {
-    console.log("🟠 AnchorVisual: Pas d'ancre, sphère rouge affichée à [0, 1.2, -1]");
-    return (
-      <mesh position={[0, 1.2, -1]}>
-        <sphereGeometry args={[0.05, 16, 16]} />
-        <meshStandardMaterial color="red" />
-      </mesh>
-    );
-  }
-
-  console.log("🟢 AnchorVisual: Ancre trouvée à", anchor);
+function ExclusionZone({ anchor, size }) {
+  if (!anchor) return null
   return (
-    <group>
-      <mesh position={anchor}>
-        <sphereGeometry args={[0.05, 16, 16]} />
-        <meshStandardMaterial color="orange" />
-      </mesh>
-      <Text
-        position={anchor.clone().add(new THREE.Vector3(0, 0.15, 0))}
-        fontSize={0.05}
-        color="white"
-        onClick={onConfirm}
-      >
-        📌 Définir ici
-      </Text>
-    </group>
-  );
+    <mesh position={anchor}>
+      <boxGeometry args={[size.x, size.y, size.z]} />
+      <meshStandardMaterial color="red" transparent opacity={0.3} wireframe />
+    </mesh>
+  )
 }
 
 function App() {
-  const [pdfs, setPDFs] = useState([]);
-  const [pdfList, setPdfList] = useState([]);
-  const [anchor, setAnchor] = useState(null);
-  const [hasAnchored, setHasAnchored] = useState(false);
-  const [xrStarted, setXRStarted] = useState(false);
-  
-  // Visualisation de la zone d'exclusion autour de l'ancre
-  function ExclusionZone({ anchor, size }) {
-    if (!anchor) return null;
-    return (
-      <mesh position={anchor}>
-        <boxGeometry args={[size, size, size]} />
-        <meshStandardMaterial color="red" transparent opacity={1} />
-      </mesh>
-    );
+  const [pdfs, setPDFs] = useState([])
+  const [pdfList, setPdfList] = useState([])
+  const [anchor, setAnchor] = useState(null)
+  const [hasAnchored, setHasAnchored] = useState(false)
+  const [xrStarted, setXRStarted] = useState(false)
+
+  useEffect(() => {
+  const waitForCV = () => {
+    if (window.cv && window.cv.Mat) {
+      console.log("OpenCV ready")
+    } else {
+      setTimeout(waitForCV, 100)
+    }
   }
-  // Stocke l'ancre dans window pour accès global
+  waitForCV()
+}, [])
+
   useEffect(() => {
     if (anchor) {
-      window.__xr_anchor = anchor;
+      window.__xr_anchor = anchor
     }
-  }, [anchor]);
+  }, [anchor])
 
-  // Taille de la zone d'exclusion (1m x 1m x 1m)
-  const exclusionZoneSize = 0.5;
+  const exclusionZoneSize = { x: 1, y: 0.3, z: 0.75 }
 
-  // Vérifie si une position est dans la zone d'exclusion autour de l'ancre
   const isInExclusionZone = (position) => {
-    if (!anchor) return false;
-    let posVec;
+    if (!anchor) return false
+    let posVec
     if (Array.isArray(position)) {
-      posVec = new THREE.Vector3(...position);
+      posVec = new THREE.Vector3(...position)
     } else if (position instanceof THREE.Vector3) {
-      posVec = position;
+      posVec = position
     } else {
-      // fallback
-      return false;
+      return false
     }
     return (
-      Math.abs(posVec.x - anchor.x) < exclusionZoneSize / 2 &&
-      Math.abs(posVec.y - anchor.y) < exclusionZoneSize / 2 &&
-      Math.abs(posVec.z - anchor.z) < exclusionZoneSize / 2
-    );
-  };
-
+      Math.abs(posVec.x - anchor.x) < exclusionZoneSize.x / 2 &&
+      Math.abs(posVec.y - anchor.y) < exclusionZoneSize.y / 2 &&
+      Math.abs(posVec.z - anchor.z) < exclusionZoneSize.z / 2
+    )
+  }
 
   useEffect(() => {
     fetch("/pdf-list.json")
       .then((res) => res.json())
       .then(setPdfList)
-      .catch((err) => console.error("Erreur chargement PDF:", err));
-  }, []);
- 
-  const addPDF = (newFile) => {
-    if (!newFile || !anchor) return;
-    const fileURL = `/${newFile}`;
-    const offset = new THREE.Vector3(
-      (Math.random() - 0.5) * 0.6,
-      0.5 + Math.random() * 0.2,
-      -0.5 + Math.random() * 0.2
-    );
-    const pdfPosition = anchor.clone().add(offset);
+      .catch((err) => console.error("Erreur chargement PDF:", err))
+  }, [])
 
-    // Vérifie la zone d'exclusion
+  const addPDF = (newFile) => {
+    if (!newFile || !anchor) return
+    const fileURL = `/${newFile}`
+    const offsetY = exclusionZoneSize.y / 2 + 1
+    const pdfPosition = new THREE.Vector3(
+      anchor.x,
+      anchor.y + offsetY,
+      anchor.z
+    )
+
     if (isInExclusionZone(pdfPosition)) {
-      alert("Impossible d'instancier un PDF dans la zone d'exclusion autour de l'ancre !");
-      return;
+      alert("Impossible d'instancier un PDF dans la zone d'exclusion autour de l'ancre !")
+      return
     }
 
     const newPDF = {
       id: Date.now(),
       position: [pdfPosition.x, pdfPosition.y, pdfPosition.z],
       file: fileURL,
-    };
-    setPDFs((prev) => [...prev, newPDF]);
-  };
+    }
+    setPDFs((prev) => [...prev, newPDF])
+  }
 
   const removePDF = (id) => {
-    setPDFs((prev) => prev.filter((pdf) => pdf.id !== id));
-  };
+    setPDFs((prev) => prev.filter((pdf) => pdf.id !== id))
+  }
+
+  const handleAnchorSet = (position) => {
+    setAnchor(position)
+    setHasAnchored(true)
+    console.log("🎯 Ancre définie à:", position)
+  }
+
+  const handleAnchorRestored = (position) => {
+    setAnchor(position)
+    setHasAnchored(true)
+  }
+
+  const resetAnchor = () => {
+    localStorage.removeItem('screenAnchor')
+    setAnchor(null)
+    setHasAnchored(false)
+    setPDFs([])
+    console.log("🔄 Ancre réinitialisée")
+  }
 
   return (
     <div className='global-display'>
       <header className="header-bar">
-          <img src="/logoSafranc.webp" alt="Logo Safran" className="logo-safran" />
-          <h1 className="app-title">Projet VR</h1>
-          <div className="header-right">
-            <span className="matricule">Matricule Fictif</span>
-            <span className="power-btn">
-              <svg width="60" height="60" viewBox="0 0 60 60">
-                <circle cx="30" cy="30" r="25" stroke="white" strokeWidth="5" fill="none" />
-                <rect x="27.5" y="10" width="5" height="20" rx="2.5" fill="white" />
-              </svg>
-            </span>
-          </div>
-        </header>
-        <div className="main-content">
-          <p className="instruction-text">
-            Pour entrer dans la version réalité augmentée de l’application cliquez sur le<br />
-            bouton si dessous dans votre casque de réalité virtuelle:
-          </p>
+        <img src="/logoSafranc.webp" alt="Logo Safran" className="logo-safran" />
+        <h1 className="app-title">Projet VR</h1>
+        <div className="header-right">
+          <span className="matricule">Matricule Fictif</span>
+          <span className="power-btn">
+            <svg width="60" height="60" viewBox="0 0 60 60">
+              <circle cx="30" cy="30" r="25" stroke="white" strokeWidth="5" fill="none" />
+              <rect x="27.5" y="10" width="5" height="20" rx="2.5" fill="white" />
+            </svg>
+          </span>
+        </div>
+      </header>
+      <div className="main-content">
+        <p className="instruction-text">
+          Pour entrer dans la version réalité augmentée de l'application cliquez sur le<br />
+          bouton ci-dessous dans votre casque de réalité virtuelle:
+        </p>
+        <button
+          className="enter-ar-btn"
+          onClick={async () => {
+            try {
+              await store.enterAR()
+              console.log("✅ Entered AR session")
+              setXRStarted(true)
+            } catch (err) {
+              console.error("❌ Failed to enter AR", err)
+            }
+          }}
+        >
+          Enter AR
+        </button>
+        {xrStarted && hasAnchored && (
           <button
             className="enter-ar-btn"
-            onClick={async () => {
-              try {
-                await store.enterAR();
-                console.log("✅ Entered AR session");
-                setXRStarted(true);
-              } catch (err) {
-                console.error("❌ Failed to enter AR", err);
-              }
-            }}
+            style={{ marginTop: '10px', background: '#dc3545' }}
+            onClick={resetAnchor}
           >
-            Enter AR
+            Réinitialiser l'ancre
           </button>
-        </div>
-      <Canvas >
+        )}
+      </div>
+      <Canvas>
         <ambientLight intensity={0.5} />
+        <pointLight position={[10, 10, 10]} />
         <XR store={store} referenceSpace="local-floor">
-          {xrStarted && (
-            <ManualHitTestAnchor
-            setAnchor={setAnchor}
-            hasAnchored={hasAnchored}
-          />
+          {xrStarted && !hasAnchored && (
+            <AutoScreenDetector onAnchorSet={handleAnchorSet} />
           )}
-          {!hasAnchored && <AnchorVisual anchor={anchor} onConfirm={() => setHasAnchored(true)} />}
 
-          {hasAnchored && (
+          {xrStarted && (
+            <PersistentAnchor 
+              position={anchor} 
+              onRestored={handleAnchorRestored}
+            />
+          )}
+
+          {hasAnchored && anchor && (
             <>
               <ExclusionZone anchor={anchor} size={exclusionZoneSize} />
+              
+              {/* Marqueur visuel de l'ancre */}
+              <mesh position={anchor}>
+                <sphereGeometry args={[0.05, 16, 16]} />
+                <meshStandardMaterial color="green" emissive="green" emissiveIntensity={0.8} />
+              </mesh>
+
               {pdfs.map((pdf) => (
                 <DraggablePDF
                   key={pdf.id}
@@ -520,7 +809,7 @@ function App() {
         </XR>
       </Canvas>
     </div>
-  );
+  )
 }
 
-export default App;
+export default App
