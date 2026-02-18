@@ -39,41 +39,134 @@ function ControllerRay({ isActive }) {
   )
 }
 
+function buildCameraMatrix(camera, width, height) {
+  const fov = camera.fov * Math.PI / 180
+  const fy = height / (2 * Math.tan(fov / 2))
+  const fx = fy
+  const cx = width / 2
+  const cy = height / 2
+
+  return cv.matFromArray(3, 3, cv.CV_64F, [
+    fx, 0, cx,
+    0, fy, cy,
+    0, 0, 1
+  ])
+}
+
+function getScreenCenter(corners) {
+  let cx = 0, cy = 0
+  for (let i = 0; i < 4; i++) {
+    cx += corners.data32F[i * 2]
+    cy += corners.data32F[i * 2 + 1]
+  }
+  return { x: cx / 4, y: cy / 4 }
+}
+
+function pixelToRayDirection(px, py, width, height, camera) {
+  const ndc = new THREE.Vector3(
+    (px / width) * 2 - 1,
+    -(py / height) * 2 + 1,
+    0.5
+  )
+  ndc.unproject(camera)
+  return ndc.sub(camera.position).normalize()
+}
+
+
 function AutoScreenDetector({ onAnchorSet }) {
   const { getFrame } = useVisionCamera()
-  const { camera } = useThree()
+  const { camera, scene } = useThree()
+  const raycaster = useRef(new THREE.Raycaster())
+
+  const stableCount = useRef(0)
+  const confirmed = useRef(false)
 
   useFrame(() => {
-    const canvas = getFrame()
-    if (!canvas || !window.cv || !window.cv.imread) return
+    if (confirmed.current) return
 
-    const mat = cv.imread(canvas) // ✅ correct
+    const canvas = getFrame()
+    if (!canvas || !window.cv) return
+
+    const mat = cv.imread(canvas)
     const corners = detectScreen(mat)
+
     if (!corners) {
+      stableCount.current = 0
       mat.delete()
       return
     }
 
-    const pose = estimatePose(corners, 0.6, 0.34, cameraMatrix)
+    // 🕒 stabilité temporelle (≈ 0.5s à 30fps)
+    stableCount.current++
+    if (stableCount.current < 15) {
+      mat.delete()
+      corners.delete()
+      return
+    }
 
-    const position = new THREE.Vector3(
-      pose.tvec.data32F[0],
-      pose.tvec.data32F[1],
-     -pose.tvec.data32F[2]
+    console.log("✅ Écran détecté (stable)")
+
+    // 📐 centre image
+    const center = getScreenCenter(corners)
+
+    // 🎯 direction XR
+    const direction = pixelToRayDirection(
+      center.x,
+      center.y,
+      canvas.width,
+      canvas.height,
+      camera
     )
 
+    // 🔦 raycast XR
+    raycaster.current.set(camera.position, direction)
+    const hits = raycaster.current.intersectObjects(scene.children, true)
+
+    if (hits.length === 0) {
+      console.warn("⚠️ Raycast XR : aucun hit")
+      mat.delete()
+      corners.delete()
+      return
+    }
+
+    const hit = hits[0]
+    const distance = hit.point.distanceTo(camera.position)
+
+    // 🔒 filtre distance réaliste écran
+    if (distance < 0.6 || distance > 5) {
+      console.warn("❌ Distance écran irréaliste:", distance)
+      mat.delete()
+      corners.delete()
+      return
+    }
+
+    // 🛡️ sécurité WebXR
+    if (!Number.isFinite(hit.point.x) ||
+        !Number.isFinite(hit.point.y) ||
+        !Number.isFinite(hit.point.z)) {
+      console.warn("❌ Point XR invalide")
+      mat.delete()
+      corners.delete()
+      return
+    }
+
+    console.log("🎯 Ancre XR validée:", hit.point)
+
+    confirmed.current = true
+    onAnchorSet(hit.point.clone())
+
     mat.delete()
-    pose.rvec.delete()
-    pove.tvec.delete()
-    onAnchorSet(position)
+    corners.delete()
   })
 
   return (
-    <Text position={[0,2,-1]} fontSize={0.08} color="cyan">
-      🔍 Recherche d’écran…
+    <Text position={[0, 2, -1]} fontSize={0.08} color="cyan">
+      🔍 Recherche automatique de l’écran…
     </Text>
   )
 }
+
+
 
 // Composant pour la sélection manuelle de l'écran
 function ManualScreenSelector({ onAnchorSet }) {
@@ -497,38 +590,71 @@ function useVisionCamera() {
 
 export function detectScreen(mat) {
   const gray = new cv.Mat()
-  const edges = new cv.Mat()
+  const blurred = new cv.Mat()
+  const thresh = new cv.Mat()
   const contours = new cv.MatVector()
   const hierarchy = new cv.Mat()
 
   cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY)
-  cv.Canny(gray, edges, 80, 150)
-  cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0)
+
+  // Écran sombre
+  cv.threshold(blurred, thresh, 60, 255, cv.THRESH_BINARY_INV)
+
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5))
+  cv.morphologyEx(thresh, thresh, cv.MORPH_CLOSE, kernel)
+
+  cv.findContours(
+    thresh,
+    contours,
+    hierarchy,
+    cv.RETR_EXTERNAL,
+    cv.CHAIN_APPROX_SIMPLE
+  )
 
   let best = null
+  let bestArea = 0
+  const imageArea = mat.rows * mat.cols
 
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i)
-    const approx = new cv.Mat()
+    const area = cv.contourArea(cnt)
 
+    // 🔒 filtre surface minimale (8% image)
+    if (area < imageArea * 0.08) {
+      cnt.delete()
+      continue
+    }
+
+    const approx = new cv.Mat()
     cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true)
 
     if (approx.rows === 4) {
-      best = approx.clone()   // on garde une copie
+      const rect = cv.boundingRect(approx)
+      const ratio = rect.width / rect.height
+
+      // 🔒 filtre ratio écran
+      if (ratio > 1.2 && ratio < 2.2 && area > bestArea) {
+        best?.delete()
+        best = approx.clone()
+        bestArea = area
+      }
     }
 
     approx.delete()
     cnt.delete()
   }
 
-  // 🔥 LIBÉRATION OBLIGATOIRE
   gray.delete()
-  edges.delete()
+  blurred.delete()
+  thresh.delete()
   contours.delete()
   hierarchy.delete()
 
   return best
 }
+
+
 
  function estimatePose(corners2D, screenWidth, screenHeight, cameraMatrix) {
   const objectPoints = cv.matFromArray(4, 1, cv.CV_32FC3, [
