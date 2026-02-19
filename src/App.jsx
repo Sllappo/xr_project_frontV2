@@ -1,5 +1,5 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { XR, createXRStore, useXR, useXRInputSourceState } from '@react-three/xr'
+import { XR, createXRStore, useXR, useXRInputSourceState, useXRHitTest, useXRRequestHitTest, XRDomOverlay } from '@react-three/xr'
 import { useState, useRef, useEffect } from 'react'
 import { Plane, Text } from "@react-three/drei"
 import * as THREE from 'three'
@@ -8,9 +8,211 @@ import './App.css'
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.mjs`
 
+const matrixHelper = new THREE.Matrix4()
+const hitPositionHelper = new THREE.Vector3()
+
 const store = createXRStore({ controller: {left:false}, hitTest: true, hand: false})
 const cv = window.cv
 
+function ScreenAnchorFromSceneModel({ onAnchorSet }) {
+  const { gl } = useThree()
+  const anchorSet = useRef(false)
+
+  useFrame((state, delta, xrFrame) => {
+    if (!xrFrame || anchorSet.current) return
+
+    // detectedPlanes est exposé sur le XRFrame par le Quest Browser
+    const planes = xrFrame.detectedPlanes
+    if (!planes) return
+
+    const session = gl.xr.getSession()
+    const refSpace = gl.xr.getReferenceSpace()
+
+    for (const plane of planes) {
+      // Filtrer uniquement les écrans via le semantic label
+      const label = plane.semanticLabel  // "screen", "table", "wall", etc.
+      
+      if (label === 'screen') {
+        const planePose = xrFrame.getPose(plane.planeSpace, refSpace)
+        if (!planePose) continue
+
+        const pos = planePose.transform.position
+        const position = new THREE.Vector3(pos.x, pos.y, pos.z)
+
+        console.log("🖥️ Écran détecté via Scene Model:", position)
+        anchorSet.current = true
+        onAnchorSet(position)
+        break
+      }
+    }
+  })
+
+  return (
+    <Text position={[0, 2, -1.5]} fontSize={0.08} color="cyan" anchorX="center">
+      🔍 Recherche de l'écran dans la pièce...
+    </Text>
+  )
+}
+
+function ScreenAnchorSelector({ onAnchorSet }) {
+  const { gl } = useThree()
+  const rightController = useXRInputSourceState("controller", "right")
+  const isPressing = useRef(false)
+  const anchorSet = useRef(false)
+  const [previewPosition, setPreviewPosition] = useState(null)
+  const [previewSize, setPreviewSize] = useState(null)
+  const lastHitPlane = useRef(null)
+
+  useXRHitTest(
+    (results, getWorldMatrix) => {
+      if (results.length === 0) {
+        setPreviewPosition(null)
+        setPreviewSize(null)
+        lastHitPlane.current = null
+        return
+      }
+
+      getWorldMatrix(matrixHelper, results[0])
+      const pos = hitPositionHelper.setFromMatrixPosition(matrixHelper)
+      setPreviewPosition(pos.clone())
+
+      // Récupérer le plan WebXR associé au hit pour avoir son polygone
+      const xrHitResult = results[0]
+      if (xrHitResult.sourceInput) {
+        lastHitPlane.current = null
+      }
+    },
+    'viewer',
+    ['plane', 'mesh']
+  )
+
+  // Lire les dimensions du plan depuis detectedPlanes en parallèle
+  useFrame((state, delta, xrFrame) => {
+    if (!xrFrame || !previewPosition) return
+
+    const planes = xrFrame.detectedPlanes
+    const refSpace = gl.xr.getReferenceSpace()
+    if (!planes || !refSpace) return
+
+    let closestPlane = null
+    let closestDist = Infinity
+
+    for (const plane of planes) {
+      const pose = xrFrame.getPose(plane.planeSpace, refSpace)
+      if (!pose) continue
+
+      const planePos = new THREE.Vector3(
+        pose.transform.position.x,
+        pose.transform.position.y,
+        pose.transform.position.z
+      )
+
+      // Trouver le plan le plus proche du point hitté
+      const dist = planePos.distanceTo(previewPosition)
+      if (dist < closestDist) {
+        closestDist = dist
+        closestPlane = { plane, pose }
+      }
+    }
+
+    if (!closestPlane || closestDist > 1.0) return
+
+    // Calculer les dimensions depuis le polygone du plan
+    const poly = closestPlane.plane.polygon
+    if (!poly || poly.length < 3) return
+
+    let minX = Infinity, maxX = -Infinity
+    let minZ = Infinity, maxZ = -Infinity
+
+    // Les vertices du polygone sont en coordonnées locales du plan
+    // Y = 0 toujours (plan plat), on utilise X et Z
+    for (const pt of poly) {
+      minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x)
+      minZ = Math.min(minZ, pt.z); maxZ = Math.max(maxZ, pt.z)
+    }
+
+    const width = maxX - minX
+    const height = maxZ - minZ  // Z = hauteur pour un plan vertical
+
+    if (width > 0.1 && height > 0.1) {
+      setPreviewSize({ width, height })
+      lastHitPlane.current = { width, height }
+    }
+  })
+
+  // Confirmer l'ancre au trigger
+  useFrame(() => {
+    if (!rightController?.inputSource?.gamepad || !previewPosition || anchorSet.current) return
+    const buttons = rightController.inputSource.gamepad.buttons
+
+    if (buttons[0]?.pressed && !isPressing.current) {
+      isPressing.current = true
+      anchorSet.current = true
+      onAnchorSet(previewPosition.clone(), lastHitPlane.current)
+    }
+    if (!buttons[0]?.pressed) isPressing.current = false
+  })
+
+  return (
+    <>
+      {/* Réticule + aperçu de la zone d'exclusion */}
+      {previewPosition && (
+        <group position={previewPosition}>
+
+          {/* Point central */}
+          <mesh>
+            <sphereGeometry args={[0.02, 16, 16]} />
+            <meshBasicMaterial color="cyan" />
+          </mesh>
+
+          {/* Aperçu de la taille du plan détecté */}
+          {previewSize && (
+            <>
+              {/* Contour de l'écran détecté */}
+              <mesh>
+                <planeGeometry args={[previewSize.width, previewSize.height]} />
+                <meshBasicMaterial
+                  color="cyan"
+                  transparent
+                  opacity={0.15}
+                  side={THREE.DoubleSide}
+                  wireframe={false}
+                />
+              </mesh>
+              {/* Bordure wireframe */}
+              <lineSegments>
+                <edgesGeometry args={[new THREE.PlaneGeometry(previewSize.width, previewSize.height)]} />
+                <lineBasicMaterial color="cyan" />
+              </lineSegments>
+
+              <Text
+                position={[0, previewSize.height / 2 + 0.1, 0]}
+                fontSize={0.05}
+                color="cyan"
+                anchorX="center"
+              >
+                {`${(previewSize.width * 100).toFixed(0)} × ${(previewSize.height * 100).toFixed(0)} cm`}
+              </Text>
+            </>
+          )}
+        </group>
+      )}
+
+      <Text
+        position={[0, 2.1, -1.5]}
+        fontSize={0.07}
+        color={previewPosition ? "lime" : "white"}
+        anchorX="center"
+      >
+        {previewPosition
+          ? previewSize
+            ? `🖥️ Écran détecté — Trigger pour ancrer`
+            : `🔍 Surface trouvée — Centrez sur l'écran`
+          : `🔍 Regardez vers votre écran...`}
+      </Text>
+    </>
+  )
+}
 // Composant pour le rayon de sélection du contrôleur
 function ControllerRay({ isActive }) {
   const rightController = useXRInputSourceState("controller", "right")
@@ -779,7 +981,7 @@ function App() {
     }
   }, [anchor])
 
-  const exclusionZoneSize = { x: 1, y: 0.3, z: 0.75 }
+  const [exclusionZoneSize, setExclusionZoneSize] = useState({ x: 1, y: 0.6, z: 0.1 })
 
   const isInExclusionZone = (position) => {
     if (!anchor) return false
@@ -832,11 +1034,20 @@ function App() {
     setPDFs((prev) => prev.filter((pdf) => pdf.id !== id))
   }
 
-  const handleAnchorSet = (position) => {
-    setAnchor(position)
-    setHasAnchored(true)
-    console.log("🎯 Ancre définie à:", position)
+
+const handleAnchorSet = (position, dimensions = null) => {
+  setAnchor(position)
+  setHasAnchored(true)
+  if (dimensions) {
+    // On ajoute un peu de marge autour de l'écran
+    setExclusionZoneSize({
+      x: dimensions.width + 0.1,
+      y: dimensions.height + 0.1,
+      z: 0.15  // profondeur fixe, l'écran est un plan
+    })
   }
+  console.log("🎯 Ancre définie à:", position, "| Taille écran:", dimensions)
+}
 
   const handleAnchorRestored = (position) => {
     setAnchor(position)
@@ -900,7 +1111,7 @@ function App() {
         <pointLight position={[10, 10, 10]} />
         <XR store={store} referenceSpace="local-floor">
           {xrStarted && !hasAnchored && (
-            <AutoScreenDetector onAnchorSet={handleAnchorSet} />
+            <ScreenAnchorSelector onAnchorSet={handleAnchorSet} />
           )}
 
           {xrStarted && (
