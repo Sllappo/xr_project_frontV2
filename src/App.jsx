@@ -338,40 +338,54 @@ function PersistentAnchor({ position, onRestored }) {
   return null
 }
 
-function DraggablePDF({ id, removePDF, initialPosition, file }) {
+function DraggablePDF({ id, removePDF, initialPosition, file, exclusionZoneSize }) {
   const handleExclusion = () => {
-    if (meshRef.current && window.__xr_anchor) {
-      const anchor = window.__xr_anchor
-      const exclusionZoneSize = 1
-      meshRef.current.geometry.computeBoundingBox()
-      const bbox = meshRef.current.geometry.boundingBox.clone()
-      bbox.applyMatrix4(meshRef.current.matrixWorld)
+    if (!meshRef.current || !window.__xr_anchor) return
+    const anchor = window.__xr_anchor
 
-      const zoneMin = new THREE.Vector3(
-        anchor.x - exclusionZoneSize / 2,
-        anchor.y - exclusionZoneSize / 2,
-        anchor.z - exclusionZoneSize / 2
-      )
-      const zoneMax = new THREE.Vector3(
-        anchor.x + exclusionZoneSize / 2,
-        anchor.y + exclusionZoneSize / 2,
-        anchor.z + exclusionZoneSize / 2
-      )
-      const exclusionBox = new THREE.Box3(zoneMin, zoneMax)
+    meshRef.current.geometry.computeBoundingBox()
+    const bbox = meshRef.current.geometry.boundingBox.clone()
+    bbox.applyMatrix4(meshRef.current.matrixWorld)
 
-      if (bbox.intersectsBox(exclusionBox)) {
-        console.log(`🚫 PDF ${id} détecté dans la zone d'exclusion — repositionnement.`)
+    // ✅ Utiliser exclusionZoneSize depuis les props
+    const zoneMin = new THREE.Vector3(
+      anchor.x - exclusionZoneSize.x / 2,
+      anchor.y - exclusionZoneSize.y / 2,
+      anchor.z - exclusionZoneSize.z / 2
+    )
+    const zoneMax = new THREE.Vector3(
+      anchor.x + exclusionZoneSize.x / 2,
+      anchor.y + exclusionZoneSize.y / 2,
+      anchor.z + exclusionZoneSize.z / 2
+    )
+    const exclusionBox = new THREE.Box3(zoneMin, zoneMax)
 
-        const currentWorldPos = new THREE.Vector3()
-        meshRef.current.getWorldPosition(currentWorldPos)
+    const currentWorldPos = new THREE.Vector3()
+    meshRef.current.getWorldPosition(currentWorldPos)
 
-        const fixedOffsetY = 1
+    if (bbox.intersectsBox(exclusionBox)) {
+      console.log(`🚫 PDF ${id} dans la zone d'exclusion — repositionnement.`)
+      const newWorldPos = currentWorldPos.clone()
+      newWorldPos.y = anchor.y + exclusionZoneSize.y / 2 + 1
+      setWorldPosition(meshRef.current, newWorldPos)
+      return
+    }
 
-        const newWorldPos = currentWorldPos.clone()
-        newWorldPos.y = anchor.y + exclusionZoneSize / 2 + fixedOffsetY
+    // Check derrière
+    const cameraPos = camera.position.clone()
+    const camToAnchor = new THREE.Vector3().subVectors(anchor, cameraPos).normalize()
+    const camToPDF = new THREE.Vector3().subVectors(currentWorldPos, cameraPos).normalize()
 
-        setWorldPosition(meshRef.current, newWorldPos)
-      }
+    const anchorDist = cameraPos.distanceTo(anchor)
+    const pdfDist = cameraPos.distanceTo(currentWorldPos)
+    const alignment = camToAnchor.dot(camToPDF)
+    const isBehind = pdfDist > anchorDist && alignment > 0.85
+
+    if (isBehind) {
+      console.log(`🚫 PDF ${id} derrière la zone d'exclusion — repositionnement.`)
+      const newWorldPos = currentWorldPos.clone()
+      newWorldPos.y = anchor.y + exclusionZoneSize.y / 2 + 1
+      setWorldPosition(meshRef.current, newWorldPos)
     }
   }
 
@@ -857,6 +871,7 @@ const handleAnchorSet = (position, dimensions = null) => {
                   initialPosition={pdf.position}
                   file={pdf.file}
                   removePDF={removePDF}
+                  exclusionZoneSize={exclusionZoneSize}
                 />
               ))}
               <VRMenu addPDF={addPDF} pdfList={pdfList} anchor={anchor} />
