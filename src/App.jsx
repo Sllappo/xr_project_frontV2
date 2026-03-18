@@ -11,8 +11,61 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pd
 const matrixHelper = new THREE.Matrix4()
 const hitPositionHelper = new THREE.Vector3()
 
-const store = createXRStore({ controller: {left:false}, hitTest: true, hand: false})
+const store = createXRStore({ controller: {left:false}, hitTest: true, hand: false, sessionInit: {
+    requiredFeatures: ['hit-test', 'plane-detection'],
+    optionalFeatures: ['anchors', 'local-floor']
+  }})
 const cv = window.cv
+
+function RoomCaptureManager({ onRoomReady }) {
+  const { session } = useXR()
+  const hasChecked = useRef(false)
+
+  useEffect(() => {
+    if (!session || hasChecked.current) return
+
+    const timer = setTimeout(() => {
+      hasChecked.current = true
+
+      session.requestAnimationFrame((time, xrFrame) => {
+        const planes = xrFrame?.detectedPlanes
+        const hasPlanes = planes && planes.size > 0
+
+        if (!hasPlanes && typeof session.initiateRoomCapture === 'function') {
+          console.log("🏠 Lancement du Room Capture...")
+          session.initiateRoomCapture()
+            .then(() => {
+              console.log("✅ Room Capture terminé")
+              onRoomReady() // → passe à l'étape suivante
+            })
+            .catch(err => console.warn("⚠️ Erreur Room Capture:", err))
+        } else {
+          console.log("✅ Plans déjà présents")
+          onRoomReady() // → passe à l'étape suivante directement
+        }
+      })
+    }, 3000)
+
+    session.requestAnimationFrame((time, xrFrame) => {
+    // ✅ Tester detectedMeshes
+    const meshes = xrFrame?.detectedMeshes
+    console.log("🕸️ Meshes détectés:", meshes?.size)
+    if (meshes) {
+      for (const mesh of meshes) {
+        console.log(`  - label: "${mesh.semanticLabel}"`)
+      }
+    }
+  })
+
+    return () => clearTimeout(timer)
+  }, [session])
+
+  return (
+    <Text position={[0, 2.1, -1.5]} fontSize={0.07} color="white" anchorX="center">
+      🏠 Configuration de la pièce en cours...
+    </Text>
+  )
+}
 
 function ScreenAnchorSelector({ onAnchorSet }) {
   const { gl } = useThree()
@@ -22,6 +75,7 @@ function ScreenAnchorSelector({ onAnchorSet }) {
   const [previewPosition, setPreviewPosition] = useState(null)
   const [previewSize, setPreviewSize] = useState(null)
   const lastHitPlane = useRef(null)
+  const screenMeshPosition = useRef(null)
 
   useXRHitTest(
     (results, getWorldMatrix) => {
@@ -46,57 +100,97 @@ function ScreenAnchorSelector({ onAnchorSet }) {
     ['plane', 'mesh']
   )
 
-  // Lire les dimensions du plan depuis detectedPlanes en parallèle
   useFrame((state, delta, xrFrame) => {
     if (!xrFrame || !previewPosition) return
 
-    const planes = xrFrame.detectedPlanes
+    const meshes = xrFrame.detectedMeshes
     const refSpace = gl.xr.getReferenceSpace()
-    if (!planes || !refSpace) return
+    if (!meshes || !refSpace) return
 
-    let closestPlane = null
+    let closestMesh = null
     let closestDist = Infinity
 
-    for (const plane of planes) {
-      const pose = xrFrame.getPose(plane.planeSpace, refSpace)
+    for (const mesh of meshes) {
+      if (mesh.semanticLabel !== "screen") continue
+
+      const pose = xrFrame.getPose(mesh.meshSpace, refSpace)
       if (!pose) continue
 
-      const planePos = new THREE.Vector3(
+      const meshPos = new THREE.Vector3(
         pose.transform.position.x,
         pose.transform.position.y,
         pose.transform.position.z
       )
 
-      // Trouver le plan le plus proche du point hitté
-      const dist = planePos.distanceTo(previewPosition)
+      const dist = meshPos.distanceTo(previewPosition)
+      console.log(`🖥️ Screen mesh trouvé — dist: ${dist.toFixed(2)}m`)
+
       if (dist < closestDist) {
         closestDist = dist
-        closestPlane = { plane, pose }
+        closestMesh = { mesh, pose }
       }
     }
 
-    if (!closestPlane || closestDist > 1.0) return
+    if (!closestMesh) return
 
-    // Calculer les dimensions depuis le polygone du plan
-    const poly = closestPlane.plane.polygon
-    if (!poly || poly.length < 3) return
+    const pose = closestMesh.pose
+    const q = pose.transform.orientation
+    const planeQuat = new THREE.Quaternion(q.x, q.y, q.z, q.w)
+    const planeMatrix = new THREE.Matrix4().makeRotationFromQuaternion(planeQuat)
 
+    const vertices = closestMesh.mesh.vertices
+    if (!vertices || vertices.length === 0) return
+
+    // ✅ Calculer min/max en espace LOCAL (sans rotation)
     let minX = Infinity, maxX = -Infinity
+    let minY = Infinity, maxY = -Infinity
     let minZ = Infinity, maxZ = -Infinity
 
-    // Les vertices du polygone sont en coordonnées locales du plan
-    // Y = 0 toujours (plan plat), on utilise X et Z
-    for (const pt of poly) {
-      minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x)
-      minZ = Math.min(minZ, pt.z); maxZ = Math.max(maxZ, pt.z)
+    for (let i = 0; i < vertices.length; i += 3) {
+      const x = vertices[i]
+      const y = vertices[i + 1]
+      const z = vertices[i + 2]
+
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+      minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z)
     }
 
-    const width = maxX - minX
-    const height = maxZ - minZ  // Z = hauteur pour un plan vertical
+    // ✅ Centre en espace local
+    const centerLocal = new THREE.Vector3(
+      (minX + maxX) / 2,
+      (minY + maxY) / 2,
+      (minZ + maxZ) / 2
+    )
+
+    // ✅ Appliquer rotation + translation pour passer en espace world
+    const meshWorldPos = new THREE.Vector3(
+      pose.transform.position.x,
+      pose.transform.position.y,
+      pose.transform.position.z
+    )
+
+    const centerWorld = centerLocal
+      .clone()
+      .applyQuaternion(planeQuat)  // rotation
+      .add(meshWorldPos)           // translation
+
+    console.log("📍 Centre géométrique:", centerWorld)
+
+    // ✅ Calculer les dimensions en espace local également
+    const rangesLocal = [
+      { val: maxX - minX },
+      { val: maxY - minY },
+      { val: maxZ - minZ },
+    ].sort((a, b) => b.val - a.val)
+
+    const width = rangesLocal[0].val
+    const height = rangesLocal[1].val
 
     if (width > 0.1 && height > 0.1) {
       setPreviewSize({ width, height })
       lastHitPlane.current = { width, height }
+      screenMeshPosition.current = centerWorld
     }
   })
 
@@ -108,7 +202,10 @@ function ScreenAnchorSelector({ onAnchorSet }) {
     if (buttons[0]?.pressed && !isPressing.current) {
       isPressing.current = true
       anchorSet.current = true
-      onAnchorSet(previewPosition.clone(), lastHitPlane.current)
+
+      // ✅ Utiliser le centre du mesh plutôt que le point hitté
+      const anchorPosition = screenMeshPosition.current ?? previewPosition.clone()
+      onAnchorSet(anchorPosition, lastHitPlane.current)
     }
     if (!buttons[0]?.pressed) isPressing.current = false
   })
@@ -578,6 +675,7 @@ function ExclusionZone({ anchor, size }) {
 }
 
 function App() {
+  const [appStep, setAppStep] = useState('room-setup') 
   const [pdfs, setPDFs] = useState([])
   const [pdfList, setPdfList] = useState([])
   const [anchor, setAnchor] = useState(null)
@@ -660,9 +758,10 @@ const handleAnchorSet = (position, dimensions = null) => {
   setHasAnchored(true)
   if (dimensions) {
     // On ajoute un peu de marge autour de l'écran
+    console.log("LA TAILLE: " + dimensions)
     setExclusionZoneSize({
-      x: dimensions.width + 0.1,
-      y: dimensions.height + 0.1,
+      x: dimensions.width,
+      y: dimensions.height,
       z: 0.15  // profondeur fixe, l'écran est un plan
     })
   }
@@ -730,27 +829,27 @@ const handleAnchorSet = (position, dimensions = null) => {
         <ambientLight intensity={0.5} />
         <pointLight position={[10, 10, 10]} />
         <XR store={store} referenceSpace="local-floor">
-          {xrStarted && !hasAnchored && (
-            <ScreenAnchorSelector onAnchorSet={handleAnchorSet} />
+          {/* ÉTAPE 1 — Room Setup */}
+          {xrStarted && appStep === 'room-setup' && (
+            <RoomCaptureManager onRoomReady={() => setAppStep('anchor-placement')} />
           )}
 
-          {xrStarted && (
-            <PersistentAnchor 
-              position={anchor} 
-              onRestored={handleAnchorRestored}
-            />
+          {/* ÉTAPE 2 — Placement de l'ancre */}
+          {xrStarted && appStep === 'anchor-placement' && (
+            <ScreenAnchorSelector onAnchorSet={(position, dimensions) => {
+              handleAnchorSet(position, dimensions)
+              setAppStep('main-app')
+            }} />
           )}
 
-          {hasAnchored && anchor && (
+          {/* ÉTAPE 3 — App principale */}
+          {xrStarted && appStep === 'main-app' && anchor && (
             <>
               <ExclusionZone anchor={anchor} size={exclusionZoneSize} />
-              
-              {/* Marqueur visuel de l'ancre */}
               <mesh position={anchor}>
                 <sphereGeometry args={[0.05, 16, 16]} />
                 <meshStandardMaterial color="green" emissive="green" emissiveIntensity={0.8} />
               </mesh>
-
               {pdfs.map((pdf) => (
                 <DraggablePDF
                   key={pdf.id}
@@ -762,6 +861,17 @@ const handleAnchorSet = (position, dimensions = null) => {
               ))}
               <VRMenu addPDF={addPDF} pdfList={pdfList} anchor={anchor} />
             </>
+          )}
+
+          {/*WL PersistentAnchor toujours actif */}
+          {xrStarted && (
+            <PersistentAnchor
+              position={anchor}
+              onRestored={(position) => {
+                handleAnchorRestored(position)
+                setAppStep('main-app') // ancre restaurée → on skip les étapes 1 et 2
+              }}
+            />
           )}
         </XR>
       </Canvas>
