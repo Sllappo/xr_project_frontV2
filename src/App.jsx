@@ -76,6 +76,8 @@ function ScreenAnchorSelector({ onAnchorSet }) {
   const [previewSize, setPreviewSize] = useState(null)
   const lastHitPlane = useRef(null)
   const screenMeshPosition = useRef(null)
+  const lastWidth = useRef(null)
+  const lastHeight = useRef(null)
 
   useXRHitTest(
     (results, getWorldMatrix) => {
@@ -97,10 +99,11 @@ function ScreenAnchorSelector({ onAnchorSet }) {
       }
     },
     'viewer',
-    ['plane', 'mesh']
+    ['mesh']
   )
 
   useFrame((state, delta, xrFrame) => {
+    if (anchorSet.current) return
     if (!xrFrame || !previewPosition) return
 
     const meshes = xrFrame.detectedMeshes
@@ -188,9 +191,19 @@ function ScreenAnchorSelector({ onAnchorSet }) {
     const height = rangesLocal[1].val
 
     if (width > 0.1 && height > 0.1) {
-      setPreviewSize({ width, height })
-      lastHitPlane.current = { width, height }
-      screenMeshPosition.current = centerWorld
+      const hasChanged = 
+        !lastWidth.current || 
+        !lastHeight.current ||
+        Math.abs(lastWidth.current - width) > 0.01 ||
+        Math.abs(lastHeight.current - height) > 0.01
+
+      if (hasChanged) {
+        lastWidth.current = width
+        lastHeight.current = height
+        setPreviewSize({ width, height })
+        lastHitPlane.current = { width, height }
+        screenMeshPosition.current = centerWorld
+      }
     }
   })
 
@@ -425,17 +438,32 @@ function DraggablePDF({ id, removePDF, initialPosition, file, exclusionZoneSize 
   }, [file])
 
   useEffect(() => {
-    if (!file || !currentPage) return
+  if (!file || !currentPage) return
 
-    fetch(`${BACK_URL}/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
-      .then(res => res.blob())
-      .then(blob => createImageBitmap(blob))
-      .then(imageBitmap => {
-        texture.current.image = imageBitmap
-        texture.current.needsUpdate = true
-      })
-      .catch(err => console.error("Erreur chargement PDF depuis serveur :", err))
-  }, [file, currentPage])
+  fetch(`${BACK_URL}/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
+    .then(res => res.blob())
+    .then(blob => createImageBitmap(blob))
+    .then(imageBitmap => {
+      // ✅ Créer une nouvelle texture depuis l'ImageBitmap
+      const newTexture = new THREE.CanvasTexture(imageBitmap)
+      newTexture.colorSpace = THREE.SRGBColorSpace
+      newTexture.needsUpdate = true
+
+      // ✅ Disposer l'ancienne texture pour libérer la mémoire GPU
+      if (texture.current) {
+        texture.current.dispose()
+      }
+
+      texture.current = newTexture
+
+      // ✅ Forcer le re-render du material
+      if (meshRef.current) {
+        meshRef.current.material.map = newTexture
+        meshRef.current.material.needsUpdate = true
+      }
+    })
+    .catch(err => console.error("Erreur chargement PDF:", err))
+}, [file, currentPage])
 
   const goToPage = (newPage) => {
     if (newPage >= 1 && newPage <= numPages) {
@@ -652,8 +680,14 @@ function VRMenu({ addPDF, pdfList }) {
       {pdfList.map((file, index) => (
         <Text
           key={index}
-          position={[-0.5, 0.2 - index * 0.1, 0]}
-          fontSize={0.08}
+          position={[-0.68, 0.2 - index * 0.12, 0]}
+          fontSize={0.06}
+          maxWidth={1.2}
+          lineHeight={1.1}
+          anchorX="left"
+          anchorY="middle"
+          textAlign="left"
+          overflowWrap="break-word"
           color={selectedFile === file ? "yellow" : "white"}
           onClick={() => setSelectedFile(file)}
         >
