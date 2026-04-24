@@ -423,7 +423,7 @@ function DraggablePDF({ id, removePDF, initialPosition, file, exclusionZoneSize 
   useEffect(() => {
     if (!file) return
 
-    fetch(`${BACK_URL}/api/pdf-info?filename=${encodeURIComponent(file)}`)
+    fetch(`/api/pdf-info?filename=${encodeURIComponent(file)}`)
       .then(res => res.json())
       .then(data => {
         if (data.pages) {
@@ -440,29 +440,34 @@ function DraggablePDF({ id, removePDF, initialPosition, file, exclusionZoneSize 
   useEffect(() => {
   if (!file || !currentPage) return
 
-  fetch(`${BACK_URL}/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
-    .then(res => res.blob())
-    .then(blob => createImageBitmap(blob))
+  const t0 = performance.now()
+  console.log(`⏱️ Début fetch page ${currentPage}`)
+
+  fetch(`/api/render-pdf?filename=${encodeURIComponent(file)}&page=${currentPage}`)
+    .then(res => {
+      console.log(`⏱️ Réponse reçue en ${(performance.now() - t0).toFixed(0)}ms`)
+      return res.blob()
+    })
+    .then(blob => {
+      console.log(`⏱️ Blob prêt en ${(performance.now() - t0).toFixed(0)}ms`)
+      return createImageBitmap(blob)
+    })
     .then(imageBitmap => {
-      // ✅ Créer une nouvelle texture depuis l'ImageBitmap
+      console.log(`⏱️ ImageBitmap prêt en ${(performance.now() - t0).toFixed(0)}ms`)
       const newTexture = new THREE.CanvasTexture(imageBitmap)
       newTexture.colorSpace = THREE.SRGBColorSpace
       newTexture.needsUpdate = true
 
-      // ✅ Disposer l'ancienne texture pour libérer la mémoire GPU
-      if (texture.current) {
-        texture.current.dispose()
-      }
-
+      if (texture.current) texture.current.dispose()
       texture.current = newTexture
 
-      // ✅ Forcer le re-render du material
       if (meshRef.current) {
         meshRef.current.material.map = newTexture
         meshRef.current.material.needsUpdate = true
       }
+      console.log(`⏱️ Texture appliquée en ${(performance.now() - t0).toFixed(0)}ms`)
     })
-    .catch(err => console.error("Erreur chargement PDF:", err))
+    .catch(err => console.error("Erreur:", err))
 }, [file, currentPage])
 
   const goToPage = (newPage) => {
@@ -775,7 +780,7 @@ function App() {
 
   const addPDF = (newFile) => {
     if (!newFile || !anchor) return
-    const fileURL = `/${newFile}`
+    const fileURL = newFile
     const offsetY = exclusionZoneSize.y / 2 + 1
     const pdfPosition = new THREE.Vector3(
       anchor.x,
